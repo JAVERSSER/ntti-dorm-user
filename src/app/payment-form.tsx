@@ -305,15 +305,33 @@ async function fetchQr(url: string): Promise<Blob> {
   return res.blob();
 }
 
+/** Phone or tablet (touch-first), where the share sheet is the way to save to Photos. */
+function isMobile() {
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+}
+
 /**
- * QR image plus a "Save" button that downloads it as a file without opening
- * it. The QR usually lives on Supabase Storage (another origin), where
- * browsers ignore <a download> and just open the image, so we download a blob
- * instead. The blob is fetched in the background as soon as the page loads,
- * so tapping Save is instant.
+ * In-app browsers (Telegram, Facebook, Instagram, LINE, Android WebViews)
+ * ignore web downloads and just open the image, so we never try one there.
+ */
+function isInAppBrowser() {
+  return /Telegram|FBAN|FBAV|Instagram|Line\/|; wv\)/i.test(navigator.userAgent);
+}
+
+type SaveStatus = "idle" | "saving" | "saved" | "hint" | "error";
+
+/**
+ * QR image plus a "Save" button that saves it without opening it:
+ * - phones: the system share sheet ("Save Image" puts it in Photos) — this
+ *   also works inside Telegram on iPhone;
+ * - in-app browsers without sharing (Telegram on Android): highlight the QR
+ *   and tell the user to press and hold it, because a download would open it;
+ * - computers: a normal file download (a blob, because <a download> is
+ *   ignored for the Supabase Storage origin).
+ * The image is fetched in the background on page load so tapping is instant.
  */
 function SaveQrButton({ qrUrl }: { qrUrl: string }) {
-  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [status, setStatus] = useState<SaveStatus>("idle");
   const blobRef = useRef<Promise<Blob> | null>(null);
 
   useEffect(() => {
@@ -323,41 +341,73 @@ function SaveQrButton({ qrUrl }: { qrUrl: string }) {
   }, [qrUrl]);
 
   useEffect(() => {
-    if (status !== "saved" && status !== "error") return;
-    const t = setTimeout(() => setStatus("idle"), 3000);
+    if (status === "idle" || status === "saving") return;
+    const t = setTimeout(() => setStatus("idle"), status === "hint" ? 6000 : 3000);
     return () => clearTimeout(t);
   }, [status]);
+
+  async function getBlob() {
+    try {
+      return await (blobRef.current ?? fetchQr(qrUrl));
+    } catch {
+      blobRef.current = fetchQr(qrUrl); // background fetch failed: try once more
+      return blobRef.current;
+    }
+  }
 
   async function save() {
     if (status === "saving") return;
     setStatus("saving");
     try {
-      let blob: Blob;
-      try {
-        blob = await (blobRef.current ?? fetchQr(qrUrl));
-      } catch {
-        blobRef.current = fetchQr(qrUrl); // background fetch failed: try once more
-        blob = await blobRef.current;
-      }
+      const blob = await getBlob();
       const ext = blob.type.includes("png") ? "png" : blob.type.includes("webp") ? "webp" : "jpg";
+      const name = `dormpay-qr.${ext}`;
+
+      if (isMobile()) {
+        const file = new File([blob], name, { type: blob.type || "image/jpeg" });
+        if (navigator.canShare?.({ files: [file] })) {
+          try {
+            await navigator.share({ files: [file] });
+            setStatus("saved");
+          } catch (err) {
+            // User closed the sheet: nothing to report.
+            setStatus(err instanceof DOMException && err.name === "AbortError" ? "idle" : "hint");
+          }
+          return;
+        }
+        if (isInAppBrowser()) {
+          setStatus("hint");
+          return;
+        }
+      }
+
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `dormpay-qr.${ext}`;
+      a.download = name;
       document.body.appendChild(a);
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
       setStatus("saved");
     } catch {
-      setStatus("error");
+      setStatus("hint");
     }
   }
+
+  const showToast = status === "saved" || status === "hint" || status === "error";
 
   return (
     <>
       {/* eslint-disable-next-line @next/next/no-img-element -- admin-managed image from Supabase Storage */}
-      <img src={qrUrl} alt="Dormitory ABA KHQR code" className="mx-auto w-full max-w-xs rounded-xl border border-slate-200" />
+      <img
+        src={qrUrl}
+        alt="Dormitory ABA KHQR code"
+        className={cn(
+          "mx-auto w-full max-w-xs rounded-xl border border-slate-200 transition-shadow",
+          status === "hint" && "animate-pulse ring-4 ring-brand-500 ring-offset-2",
+        )}
+      />
 
       <button type="button" onClick={save} disabled={status === "saving"} className={buttonClass("secondary", "w-full")}>
         {status === "saving" ? (
@@ -380,10 +430,14 @@ function SaveQrButton({ qrUrl }: { qrUrl: string }) {
         aria-live="polite"
         className={cn(
           "pointer-events-none fixed inset-x-0 bottom-6 z-50 flex justify-center px-4 transition-all duration-300",
-          status === "saved" || status === "error" ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0",
+          showToast ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0",
         )}
       >
-        {status === "error" ? (
+        {status === "hint" ? (
+          <span className="flex max-w-sm items-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg">
+            <Download className="size-5 shrink-0 text-brand-200" aria-hidden /> Press and hold the QR image above, then tap “Save image”.
+          </span>
+        ) : status === "error" ? (
           <span className="flex items-center gap-2 rounded-full bg-red-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg">
             <X className="size-5" aria-hidden /> Could not save. Long-press the QR to save it.
           </span>
