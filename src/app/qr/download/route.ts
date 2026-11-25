@@ -1,3 +1,4 @@
+import { downloadName } from "@/lib/file-name";
 import { getQrUrl } from "@/lib/form-data";
 
 /**
@@ -17,7 +18,7 @@ export async function GET(request: Request) {
   return new Response(upstream.body, {
     headers: {
       "Content-Type": type,
-      "Content-Disposition": `attachment; filename="dormpay-qr.${ext}"`,
+      "Content-Disposition": `attachment; filename="${downloadName(new URL(request.url).searchParams.get("name"), "dormpay-qr")}.${ext}"`,
       "Cache-Control": "no-store",
     },
   });

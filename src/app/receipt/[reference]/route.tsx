@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { ImageResponse } from "next/og";
+import { downloadName } from "@/lib/file-name";
 import { verifyReceipt } from "@/lib/receipt";
 import { db } from "@/lib/supabase";
 
@@ -39,7 +40,8 @@ function formatTime(iso: string) {
  */
 export async function GET(request: Request, { params }: { params: Promise<{ reference: string }> }) {
   const { reference } = await params;
-  const sig = new URL(request.url).searchParams.get("sig");
+  const query = new URL(request.url).searchParams;
+  const sig = query.get("sig");
   if (!verifyReceipt(reference, sig)) return new Response("Not found", { status: 404 });
 
   const { data, error } = await db()
@@ -104,7 +106,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ refe
       height: 1350,
       fonts,
       headers: {
-        "Content-Disposition": `attachment; filename="dormpay-receipt-${reference}.png"`,
+        "Content-Disposition": `attachment; filename="${downloadName(query.get("name"), `dormpay-receipt-${reference}`)}.png"`,
         "Cache-Control": "private, no-store",
       },
     },

@@ -103,6 +103,20 @@ export function markQrSaved(qrUrl: string) {
   write(QR_SAVED_KEY, qrUrl);
 }
 
+// ---- Download file names ------------------------------------------------
+
+/**
+ * Next file name for a download from this phone: "dormpay-qr" the first time,
+ * then "dormpay-qr_1", "dormpay-qr_2", … so a new download never has the same
+ * name as one already saved.
+ */
+export function nextDownloadName(base: string): string {
+  const key = `dormpay:downloads:${base}`;
+  const count = Number(read(key)) || 0;
+  write(key, String(count + 1));
+  return count === 0 ? base : `${base}_${count}`;
+}
+
 // ---- Receipts ----------------------------------------------------------
 
 function parseReceipts(raw: string | null): SavedReceipt[] {

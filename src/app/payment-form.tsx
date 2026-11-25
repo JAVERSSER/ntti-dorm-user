@@ -4,7 +4,7 @@ import { CheckCircle2, Download, ImageUp, Send, X } from "lucide-react";
 import { useActionState, useEffect, useRef, useState, useTransition, type FormEvent, type ReactNode } from "react";
 import { Alert, buttonClass, Card, cn, Spinner } from "@/components/ui";
 import { MAX_SLIP_BYTES } from "@/lib/options";
-import { markQrSaved, removeReceipt, saveReceipt, storeQrImage, useQrAlreadySaved, useSavedReceipts, useStoredQrImage, type SavedReceipt } from "@/lib/local-saves";
+import { markQrSaved, nextDownloadName, removeReceipt, saveReceipt, storeQrImage, useQrAlreadySaved, useSavedReceipts, useStoredQrImage, type SavedReceipt } from "@/lib/local-saves";
 import { submitPayment, type SubmitState } from "./actions";
 
 type Resident = { room: string; name: string; grade: string; institution: string };
@@ -320,9 +320,11 @@ function isInAppBrowser() {
 }
 
 /** Start a download of a same-origin attachment URL without leaving the page. */
-function startDownload(url: string) {
+function startDownload(url: string, fileName: string) {
+  const href = new URL(url, location.href);
+  href.searchParams.set("name", fileName);
   const a = document.createElement("a");
-  a.href = url;
+  a.href = href.pathname + href.search;
   a.download = "";
   a.rel = "noopener";
   document.body.appendChild(a);
@@ -340,7 +342,7 @@ type SaveStatus = "idle" | "downloading" | "hint" | "ios";
  * first (Apple's rule, cannot be skipped), and some in-app browsers cannot
  * download at all, so those get a "press and hold the image" tip as a backup.
  */
-function useDownload(url: string) {
+function useDownload(url: string, fileBase: string) {
   const [status, setStatus] = useState<SaveStatus>("idle");
 
   useEffect(() => {
@@ -350,7 +352,7 @@ function useDownload(url: string) {
   }, [status]);
 
   function start() {
-    startDownload(url);
+    startDownload(url, nextDownloadName(fileBase));
     setStatus(isIOS() ? "ios" : isInAppBrowser() ? "hint" : "downloading");
   }
 
@@ -406,7 +408,7 @@ function DownloadToast({ status, what }: { status: SaveStatus; what: string }) {
  * downloads it; once saved, the button turns green so the student can see it.
  */
 function SaveQrButton({ qrUrl }: { qrUrl: string }) {
-  const { status, start } = useDownload(QR_DOWNLOAD_URL);
+  const { status, start } = useDownload(QR_DOWNLOAD_URL, "dormpay-qr");
   const alreadySaved = useQrAlreadySaved(qrUrl);
   const storedCopy = useStoredQrImage(qrUrl);
   const [broken, setBroken] = useState(false);
@@ -447,7 +449,7 @@ function SaveQrButton({ qrUrl }: { qrUrl: string }) {
  * button saves it again.
  */
 function ReceiptSaver({ receipt }: { receipt: Omit<SavedReceipt, "savedAt"> }) {
-  const { status, start } = useDownload(receipt.receiptUrl);
+  const { status, start } = useDownload(receipt.receiptUrl, `dormpay-receipt-${receipt.reference}`);
   const started = useRef(false);
 
   useEffect(() => {
@@ -489,7 +491,7 @@ function MyReceipts() {
 }
 
 function MyReceiptRow({ receipt }: { receipt: SavedReceipt }) {
-  const { status, start } = useDownload(receipt.receiptUrl);
+  const { status, start } = useDownload(receipt.receiptUrl, `dormpay-receipt-${receipt.reference}`);
   return (
     <li className="flex items-center gap-3 py-3">
       <div className="min-w-0 flex-1">
