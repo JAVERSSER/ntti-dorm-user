@@ -1,7 +1,7 @@
 "use client";
 
 import { CheckCircle2, Download, ImageUp, Send, X } from "lucide-react";
-import { useActionState, useEffect, useRef, useState, useTransition, type FormEvent, type ReactNode } from "react";
+import { useActionState, useEffect, useRef, useState, useSyncExternalStore, useTransition, type FormEvent, type ReactNode } from "react";
 import { Alert, buttonClass, Card, cn, Spinner } from "@/components/ui";
 import { MAX_SLIP_BYTES } from "@/lib/options";
 import { markQrSaved, nextDownloadName, removeReceipt, saveReceipt, storeQrImage, useQrAlreadySaved, useSavedReceipts, useStoredQrImage, type SavedReceipt } from "@/lib/local-saves";
@@ -332,48 +332,122 @@ function startDownload(url: string, fileName: string) {
   a.remove();
 }
 
-type SaveStatus = "idle" | "downloading" | "hint" | "ios";
+/** iPhone gets a "to Photos" label; the server render and other phones get the plain one. */
+function useIosLabel(ios: string, other: string) {
+  return useSyncExternalStore(
+    () => () => {},
+    () => (isIOS() ? ios : other),
+    () => other,
+  );
+}
+
+type SaveStatus = "idle" | "downloading" | "hint" | "photos" | "tapAgain";
 
 /**
- * Download a same-origin attachment URL (/qr/download, /receipt/…) in every
- * browser: Chrome, Safari on iPhone, Vivo / Samsung / Mi / Opera / Firefox /
- * Edge, Telegram, computers. Browsers download an attachment instead of
- * showing it, and the page stays put. iPhone browsers always ask "Download?"
- * first (Apple's rule, cannot be skipped), and some in-app browsers cannot
- * download at all, so those get a "press and hold the image" tip as a backup.
+ * Save an image from a same-origin URL (/qr/download, /receipt/…) to the phone.
+ *
+ * - iPhone / iPad: the share menu with the image file, so "Save Image" puts it
+ *   in Photos and the page stays put. Safari only opens the menu right after a
+ *   tap, so the image is fetched ahead of time (`prefetch`, or on touch); if it
+ *   was not ready yet, the student is asked to tap once more. Browsers without
+ *   file sharing (Facebook / Instagram in-app) get "press and hold the image".
+ * - Android and computers: a download of the attachment URL (no question; on
+ *   Android it lands in Download, which the Gallery shows as an album).
+ *   In-app browsers also get the press-and-hold tip as a backup.
  */
-function useDownload(url: string, fileBase: string) {
+function useDownload(url: string, fileBase: string, { prefetch = false } = {}) {
   const [status, setStatus] = useState<SaveStatus>("idle");
+  const blob = useRef<{ url: string; promise: Promise<Blob>; value?: Blob } | null>(null);
 
   useEffect(() => {
     if (status === "idle") return;
-    const t = setTimeout(() => setStatus("idle"), status === "ios" ? 8000 : 6000);
+    const t = setTimeout(() => setStatus("idle"), status === "hint" ? 8000 : 4000);
     return () => clearTimeout(t);
   }, [status]);
 
-  function start() {
-    startDownload(url, nextDownloadName(fileBase));
-    setStatus(isIOS() ? "ios" : isInAppBrowser() ? "hint" : "downloading");
+  /** Fetch the image once (iPhone only) and remember it for the share menu. */
+  function load() {
+    if (blob.current?.url === url) return blob.current.promise;
+    const entry: { url: string; promise: Promise<Blob>; value?: Blob } = {
+      url,
+      promise: fetch(url).then((res) => {
+        if (!res.ok) throw new Error(String(res.status));
+        return res.blob();
+      }),
+    };
+    entry.promise.then(
+      (b) => (entry.value = b),
+      () => blob.current === entry && (blob.current = null),
+    );
+    blob.current = entry;
+    return entry.promise;
   }
 
-  return { status, start };
+  useEffect(() => {
+    if (prefetch && isIOS()) load().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load reads the latest url
+  }, [url, prefetch]);
+
+  async function shareToPhotos() {
+    let image = blob.current?.url === url ? blob.current.value : undefined;
+    if (!image) {
+      // Not fetched yet: fetch now; Safari may then refuse the menu (no recent tap).
+      try {
+        image = await load();
+      } catch {
+        return setStatus("hint");
+      }
+    }
+    const type = image.type.startsWith("image/") ? image.type : "image/png";
+    const ext = type.includes("png") ? "png" : type.includes("webp") ? "webp" : "jpg";
+    const file = new File([image], `${nextDownloadName(fileBase)}.${ext}`, { type });
+    if (!navigator.canShare?.({ files: [file] })) return setStatus("hint");
+    try {
+      await navigator.share({ files: [file] });
+      setStatus("photos");
+    } catch (err) {
+      const name = err instanceof DOMException ? err.name : "";
+      if (name === "AbortError") setStatus("idle"); // closed the menu
+      else if (name === "NotAllowedError") setStatus("tapAgain"); // image is ready now
+      else setStatus("hint");
+    }
+  }
+
+  /** `auto`: started by the page, not a tap — iPhone then only gets the image ready. */
+  function start({ auto = false }: { auto?: boolean } = {}) {
+    if (isIOS()) {
+      if (auto) load().catch(() => {});
+      else void shareToPhotos();
+      return;
+    }
+    startDownload(url, nextDownloadName(fileBase));
+    setStatus(isInAppBrowser() ? "hint" : "downloading");
+  }
+
+  /** Warm the image on touch, so the share menu can open on this tap. */
+  function warm() {
+    if (isIOS()) load().catch(() => {});
+  }
+
+  return { status, start, warm };
 }
 
 /** Pulsing ring on the image while the "press and hold" tip shows. */
 function highlightClass(status: SaveStatus) {
-  return (status === "hint" || status === "ios") && "animate-pulse ring-4 ring-brand-500 ring-offset-2";
+  return status === "hint" && "animate-pulse ring-4 ring-brand-500 ring-offset-2";
 }
 
-function DownloadButton({ status, onClick, label }: { status: SaveStatus; onClick: () => void; label: string }) {
+function DownloadButton({ status, onClick, onTouchStart, label }: { status: SaveStatus; onClick: () => void; onTouchStart?: () => void; label: string }) {
+  const done = status === "downloading" || status === "photos";
   return (
-    <button type="button" onClick={onClick} className={buttonClass("secondary", "w-full")}>
-      {status === "idle" ? (
+    <button type="button" onClick={onClick} onTouchStart={onTouchStart} className={buttonClass("secondary", "w-full")}>
+      {done ? (
         <>
-          <Download className="size-5" aria-hidden /> {label}
+          <CheckCircle2 className="size-5 text-emerald-600" aria-hidden /> {status === "photos" ? "Saved" : "Downloading"}
         </>
       ) : (
         <>
-          <CheckCircle2 className="size-5 text-emerald-600" aria-hidden /> Downloading
+          <Download className="size-5" aria-hidden /> {status === "tapAgain" ? "Tap again to save" : label}
         </>
       )}
     </button>
@@ -381,6 +455,14 @@ function DownloadButton({ status, onClick, label }: { status: SaveStatus; onClic
 }
 
 function DownloadToast({ status, what }: { status: SaveStatus; what: string }) {
+  const message =
+    status === "photos"
+      ? `${what === "QR" ? "QR" : "Receipt"} image saved.`
+      : status === "tapAgain"
+        ? `Ready — tap the button again, then choose “Save Image”.`
+        : status === "hint"
+          ? `Press and hold the ${what} image, then tap “Save image” / “Save to Photos”.`
+          : `Saving ${what} image to your phone…`;
   return (
     <div
       role="status"
@@ -392,23 +474,21 @@ function DownloadToast({ status, what }: { status: SaveStatus; what: string }) {
     >
       <span className="flex max-w-sm items-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg">
         <CheckCircle2 className="size-5 shrink-0 text-emerald-400" aria-hidden />
-        {status === "ios"
-          ? `Tap “Download” to save. Or press and hold the ${what}, then tap “Save to Photos”.`
-          : status === "hint"
-            ? `Downloading… If nothing happens, press and hold the ${what}, then tap “Save image”.`
-            : `Downloading ${what} image… check your Downloads.`}
+        {status === "idle" ? "" : message}
       </span>
     </div>
   );
 }
 
 /**
- * QR image plus a "Save QR image" button (see useDownload). A copy of the QR
- * is kept silently in the browser as soon as the page opens. Every tap
- * downloads it; once saved, the button turns green so the student can see it.
+ * QR image plus a "Save QR image" button (see useDownload: Photos on iPhone,
+ * Download / Gallery on Android). A copy of the QR is kept silently in the
+ * browser as soon as the page opens. Every tap saves it; once saved, the
+ * button turns green so the student can see it.
  */
 function SaveQrButton({ qrUrl }: { qrUrl: string }) {
-  const { status, start } = useDownload(QR_DOWNLOAD_URL, "dormpay-qr");
+  const { status, start, warm } = useDownload(QR_DOWNLOAD_URL, "dormpay-qr", { prefetch: true });
+  const label = useIosLabel("Save QR to Photos", "Save QR image");
   const alreadySaved = useQrAlreadySaved(qrUrl);
   const storedCopy = useStoredQrImage(qrUrl);
   const [broken, setBroken] = useState(false);
@@ -432,11 +512,11 @@ function SaveQrButton({ qrUrl }: { qrUrl: string }) {
         className={cn("mx-auto w-full max-w-xs rounded-xl border border-slate-200 transition-shadow [-webkit-touch-callout:default]", highlightClass(status))}
       />
       {alreadySaved && status === "idle" ? (
-        <button type="button" onClick={save} className={buttonClass("secondary", "w-full border-emerald-300 text-emerald-700")}>
+        <button type="button" onClick={save} onTouchStart={warm} className={buttonClass("secondary", "w-full border-emerald-300 text-emerald-700")}>
           <CheckCircle2 className="size-5" aria-hidden /> QR saved · Tap to save again
         </button>
       ) : (
-        <DownloadButton status={status} onClick={save} label="Save QR image" />
+        <DownloadButton status={status} onClick={save} onTouchStart={warm} label={label} />
       )}
       <DownloadToast status={status} what="QR" />
     </>
@@ -445,18 +525,19 @@ function SaveQrButton({ qrUrl }: { qrUrl: string }) {
 
 /**
  * Receipt image on the success screen. As soon as the payment is submitted it
- * is kept in the browser (My receipts) and downloaded to the phone; the
- * button saves it again.
+ * is kept in the browser (My receipts). Android also downloads it right away;
+ * iPhone needs one tap on the button (Apple only opens the save menu after a tap).
  */
 function ReceiptSaver({ receipt }: { receipt: Omit<SavedReceipt, "savedAt"> }) {
-  const { status, start } = useDownload(receipt.receiptUrl, `dormpay-receipt-${receipt.reference}`);
+  const { status, start, warm } = useDownload(receipt.receiptUrl, `dormpay-receipt-${receipt.reference}`, { prefetch: true });
+  const label = useIosLabel("Save receipt to Photos", "Save receipt");
   const started = useRef(false);
 
   useEffect(() => {
     if (started.current) return; // once, even in React Strict Mode
     started.current = true;
     saveReceipt(receipt);
-    start();
+    start({ auto: true }); // Android: downloads now. iPhone: gets it ready for the button.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on the success screen
   }, []);
 
@@ -468,7 +549,7 @@ function ReceiptSaver({ receipt }: { receipt: Omit<SavedReceipt, "savedAt"> }) {
         alt="Your payment receipt"
         className={cn("mx-auto w-full max-w-60 rounded-xl border border-slate-200 transition-shadow [-webkit-touch-callout:default]", highlightClass(status))}
       />
-      <DownloadButton status={status} onClick={start} label="Save receipt" />
+      <DownloadButton status={status} onClick={() => start()} onTouchStart={warm} label={label} />
       <DownloadToast status={status} what="receipt" />
     </>
   );
@@ -491,7 +572,7 @@ function MyReceipts() {
 }
 
 function MyReceiptRow({ receipt }: { receipt: SavedReceipt }) {
-  const { status, start } = useDownload(receipt.receiptUrl, `dormpay-receipt-${receipt.reference}`);
+  const { status, start, warm } = useDownload(receipt.receiptUrl, `dormpay-receipt-${receipt.reference}`);
   return (
     <li className="flex items-center gap-3 py-3">
       <div className="min-w-0 flex-1">
@@ -500,8 +581,9 @@ function MyReceiptRow({ receipt }: { receipt: SavedReceipt }) {
           {receipt.studentName} · Room {receipt.room} · <span className="font-mono">{receipt.reference}</span>
         </p>
       </div>
-      <button type="button" onClick={start} className={buttonClass("secondary", "min-h-10 px-3 text-sm")} aria-label={`Save receipt ${receipt.reference}`}>
-        {status === "idle" ? <Download className="size-4" aria-hidden /> : <CheckCircle2 className="size-4 text-emerald-600" aria-hidden />} Save
+      <button type="button" onClick={() => start()} onTouchStart={warm} className={buttonClass("secondary", "min-h-10 px-3 text-sm")} aria-label={`Save receipt ${receipt.reference}`}>
+        {status === "downloading" || status === "photos" ? <CheckCircle2 className="size-4 text-emerald-600" aria-hidden /> : <Download className="size-4" aria-hidden />}{" "}
+        {status === "tapAgain" ? "Tap again" : "Save"}
       </button>
       <button
         type="button"
