@@ -12,18 +12,56 @@ type Props = { rooms: string[]; institutions: string[]; grades: string[]; reside
 /** Value of the "my name is not in the list" choice. */
 const OTHER = "__other__";
 
-/** Shrink very large photos in the browser so uploads stay fast on mobile data. */
+/** Longest side of the uploaded image; payment slip text stays readable at this size. */
+const SLIP_MAX_SIDE = 1280;
+/** Smallest longest side we will shrink to while chasing the target size. */
+const SLIP_MIN_SIDE = 800;
+/** Aim for about 100 KB per screenshot to keep Supabase storage tiny. */
+const SLIP_TARGET_BYTES = 100 * 1024;
+
+function encode(canvas: HTMLCanvasElement, type: string, quality: number) {
+  return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, quality));
+}
+
+/**
+ * Compress every screenshot in the browser before upload: resize, then WebP
+ * (JPEG on browsers that cannot encode WebP), lowering quality and size until
+ * it is near SLIP_TARGET_BYTES. Falls back to the original file on failure.
+ */
 async function shrinkImage(file: File): Promise<File> {
-  if (file.size <= 1.5 * 1024 * 1024) return file;
   try {
     const bitmap = await createImageBitmap(file);
-    const scale = Math.min(1, 2000 / Math.max(bitmap.width, bitmap.height));
     const canvas = document.createElement("canvas");
-    canvas.width = Math.round(bitmap.width * scale);
-    canvas.height = Math.round(bitmap.height * scale);
-    canvas.getContext("2d")?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
-    return blob && blob.size < file.size ? new File([blob], "slip.jpg", { type: "image/jpeg" }) : file;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return file;
+
+    let side = Math.min(SLIP_MAX_SIDE, Math.max(bitmap.width, bitmap.height));
+    let best: Blob | null = null;
+
+    while (true) {
+      const scale = side / Math.max(bitmap.width, bitmap.height);
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      ctx.fillStyle = "#fff"; // transparent PNGs would turn black in JPEG
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+
+      for (const quality of [0.7, 0.6, 0.5, 0.4]) {
+        let blob = await encode(canvas, "image/webp", quality);
+        // Some Safari versions silently return PNG for WebP: use JPEG there.
+        if (!blob || blob.type !== "image/webp") blob = await encode(canvas, "image/jpeg", quality);
+        if (blob && (!best || blob.size < best.size)) best = blob;
+        if (blob && blob.size <= SLIP_TARGET_BYTES) break;
+      }
+
+      if (!best || best.size <= SLIP_TARGET_BYTES || side <= SLIP_MIN_SIDE) break;
+      side = Math.max(SLIP_MIN_SIDE, Math.round(side * 0.8));
+    }
+    bitmap.close();
+
+    if (!best || best.size >= file.size) return file;
+    const ext = best.type === "image/webp" ? "webp" : "jpg";
+    return new File([best], `slip.${ext}`, { type: best.type });
   } catch {
     return file;
   }
