@@ -1,7 +1,7 @@
 "use client";
 
 import { CheckCircle2, Download, ImageUp, Send, X } from "lucide-react";
-import { useActionState, useEffect, useState, useTransition, type FormEvent, type ReactNode } from "react";
+import { useActionState, useEffect, useRef, useState, useTransition, type FormEvent, type ReactNode } from "react";
 import { Alert, buttonClass, Card, cn, Spinner } from "@/components/ui";
 import { MAX_SLIP_BYTES } from "@/lib/options";
 import { submitPayment, type SubmitState } from "./actions";
@@ -112,7 +112,7 @@ function Inner({ rooms, institutions, grades, residents, qrUrl, months, onReset 
         <p className="rounded-xl bg-slate-50 py-3 text-sm text-slate-600">
           Reference <span className="ml-1 font-mono text-lg font-bold tracking-wider text-slate-900">{state.reference}</span>
         </p>
-        <p className="text-xs text-slate-500">Take a screenshot of this page to keep your reference.</p>
+        <ReceiptSaver url={state.receiptUrl} />
         <button type="button" onClick={onReset} className={buttonClass("secondary", "w-full")}>
           Submit another payment
         </button>
@@ -311,11 +311,11 @@ function isInAppBrowser() {
   return /Telegram|FBAN|FBAV|Instagram|Line\/|; wv\)/i.test(navigator.userAgent);
 }
 
-/** Start a download of the attachment URL without leaving the page. */
-function startDownload() {
+/** Start a download of a same-origin attachment URL without leaving the page. */
+function startDownload(url: string) {
   const a = document.createElement("a");
-  a.href = QR_DOWNLOAD_URL;
-  a.download = "dormpay-qr";
+  a.href = url;
+  a.download = "";
   a.rel = "noopener";
   document.body.appendChild(a);
   a.click();
@@ -325,16 +325,14 @@ function startDownload() {
 type SaveStatus = "idle" | "downloading" | "hint" | "ios";
 
 /**
- * QR image plus a "Save" button that downloads it without opening it, in every
- * browser (Chrome, Safari on iPhone, Vivo / Samsung / Mi / Opera / Firefox /
- * Edge, Telegram, computers): it uses /qr/download, a same-origin URL sent as
- * an attachment, which browsers download instead of showing, and the page
- * stays put. In-app browsers also get a "press and hold the QR" tip as a backup.
- * iPhone browsers always ask "Download?" first (Apple's rule, cannot be
- * skipped), and some in-app ones (Facebook, Instagram) cannot download at all,
- * so on iPhone the tip also offers long-press → "Save to Photos".
+ * Download a same-origin attachment URL (/qr/download, /receipt/…) in every
+ * browser: Chrome, Safari on iPhone, Vivo / Samsung / Mi / Opera / Firefox /
+ * Edge, Telegram, computers. Browsers download an attachment instead of
+ * showing it, and the page stays put. iPhone browsers always ask "Download?"
+ * first (Apple's rule, cannot be skipped), and some in-app browsers cannot
+ * download at all, so those get a "press and hold the image" tip as a backup.
  */
-function SaveQrButton({ qrUrl }: { qrUrl: string }) {
+function useDownload(url: string) {
   const [status, setStatus] = useState<SaveStatus>("idle");
 
   useEffect(() => {
@@ -343,54 +341,99 @@ function SaveQrButton({ qrUrl }: { qrUrl: string }) {
     return () => clearTimeout(t);
   }, [status]);
 
-  function save() {
-    startDownload();
+  function start() {
+    startDownload(url);
     setStatus(isIOS() ? "ios" : isInAppBrowser() ? "hint" : "downloading");
   }
 
-  const showToast = status !== "idle";
+  return { status, start };
+}
 
+/** Pulsing ring on the image while the "press and hold" tip shows. */
+function highlightClass(status: SaveStatus) {
+  return (status === "hint" || status === "ios") && "animate-pulse ring-4 ring-brand-500 ring-offset-2";
+}
+
+function DownloadButton({ status, onClick, label }: { status: SaveStatus; onClick: () => void; label: string }) {
+  return (
+    <button type="button" onClick={onClick} className={buttonClass("secondary", "w-full")}>
+      {status === "idle" ? (
+        <>
+          <Download className="size-5" aria-hidden /> {label}
+        </>
+      ) : (
+        <>
+          <CheckCircle2 className="size-5 text-emerald-600" aria-hidden /> Downloading
+        </>
+      )}
+    </button>
+  );
+}
+
+function DownloadToast({ status, what }: { status: SaveStatus; what: string }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={cn(
+        "pointer-events-none fixed inset-x-0 bottom-6 z-50 flex justify-center px-4 transition-all duration-300",
+        status !== "idle" ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0",
+      )}
+    >
+      <span className="flex max-w-sm items-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg">
+        <CheckCircle2 className="size-5 shrink-0 text-emerald-400" aria-hidden />
+        {status === "ios"
+          ? `Tap “Download” to save. Or press and hold the ${what}, then tap “Save to Photos”.`
+          : status === "hint"
+            ? `Downloading… If nothing happens, press and hold the ${what}, then tap “Save image”.`
+            : `Downloading ${what} image… check your Downloads.`}
+      </span>
+    </div>
+  );
+}
+
+/** QR image plus a "Save QR image" button (see useDownload). */
+function SaveQrButton({ qrUrl }: { qrUrl: string }) {
+  const { status, start } = useDownload(QR_DOWNLOAD_URL);
   return (
     <>
       {/* eslint-disable-next-line @next/next/no-img-element -- admin-managed image from Supabase Storage */}
       <img
         src={qrUrl}
         alt="Dormitory ABA KHQR code"
-        className={cn(
-          "mx-auto w-full max-w-xs rounded-xl border border-slate-200 transition-shadow [-webkit-touch-callout:default]",
-          (status === "hint" || status === "ios") && "animate-pulse ring-4 ring-brand-500 ring-offset-2",
-        )}
+        className={cn("mx-auto w-full max-w-xs rounded-xl border border-slate-200 transition-shadow [-webkit-touch-callout:default]", highlightClass(status))}
       />
+      <DownloadButton status={status} onClick={start} label="Save QR image" />
+      <DownloadToast status={status} what="QR" />
+    </>
+  );
+}
 
-      <button type="button" onClick={save} className={buttonClass("secondary", "w-full")}>
-        {status === "idle" ? (
-          <>
-            <Download className="size-5" aria-hidden /> Save QR image
-          </>
-        ) : (
-          <>
-            <CheckCircle2 className="size-5 text-emerald-600" aria-hidden /> Downloading
-          </>
-        )}
-      </button>
+/**
+ * Receipt image on the success screen. It downloads by itself as soon as the
+ * payment is submitted, and the button saves it again.
+ */
+function ReceiptSaver({ url }: { url: string }) {
+  const { status, start } = useDownload(url);
+  const started = useRef(false);
 
-      <div
-        role="status"
-        aria-live="polite"
-        className={cn(
-          "pointer-events-none fixed inset-x-0 bottom-6 z-50 flex justify-center px-4 transition-all duration-300",
-          showToast ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0",
-        )}
-      >
-        <span className="flex max-w-sm items-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg">
-          <CheckCircle2 className="size-5 shrink-0 text-emerald-400" aria-hidden />
-          {status === "ios"
-            ? "Tap “Download” to save. Or press and hold the QR, then tap “Save to Photos”."
-            : status === "hint"
-            ? "Downloading… If nothing happens, press and hold the QR, then tap “Save image”."
-            : "Downloading QR image… check your Downloads."}
-        </span>
-      </div>
+  useEffect(() => {
+    if (started.current) return; // once, even in React Strict Mode
+    started.current = true;
+    start();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on the success screen
+  }, []);
+
+  return (
+    <>
+      {/* eslint-disable-next-line @next/next/no-img-element -- generated receipt PNG */}
+      <img
+        src={url}
+        alt="Your payment receipt"
+        className={cn("mx-auto w-full max-w-60 rounded-xl border border-slate-200 transition-shadow [-webkit-touch-callout:default]", highlightClass(status))}
+      />
+      <DownloadButton status={status} onClick={start} label="Save receipt" />
+      <DownloadToast status={status} what="receipt" />
     </>
   );
 }

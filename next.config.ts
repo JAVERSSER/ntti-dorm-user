@@ -14,6 +14,8 @@ const nextConfig: NextConfig = {
   // Dev only: let phones on the same Wi-Fi (http://192.168.x.x:3000) load the dev server.
   allowedDevOrigins: ["192.168.*.*"],
   outputFileTracingRoot: path.join(__dirname),
+  // The receipt image reads its Khmer font from disk: ship it with that route.
+  outputFileTracingIncludes: { "/receipt/[reference]": ["./src/assets/fonts/**"] },
   experimental: {
     // Payment screenshots are posted to a Server Action (max 5 MB + form overhead).
     serverActions: { bodySizeLimit: "6mb" },

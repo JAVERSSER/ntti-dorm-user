@@ -4,11 +4,12 @@ import { randomUUID } from "node:crypto";
 import { db } from "@/lib/supabase";
 import { MAX_SLIP_BYTES, payableMonths } from "@/lib/options";
 import { getGrades } from "@/lib/form-data";
+import { receiptUrl } from "@/lib/receipt";
 
 export type SubmitState =
   | { status: "idle" }
   | { status: "error"; message: string; fields?: Partial<Record<"room" | "month" | "student_name" | "grade" | "institution" | "slip", string>> }
-  | { status: "success"; reference: string; studentName: string; monthLabel: string };
+  | { status: "success"; reference: string; studentName: string; monthLabel: string; receiptUrl: string };
 
 /** Detect the real image type from the file's first bytes (never trust the browser's MIME type). */
 function sniffImage(bytes: Uint8Array): { ext: string; mime: string } | null {
@@ -95,5 +96,6 @@ export async function submitPayment(_prev: SubmitState, formData: FormData): Pro
   }
 
   const monthLabel = payableMonths().find((m) => m.value === month)?.label ?? month;
-  return { status: "success", reference: data.reference as string, studentName, monthLabel };
+  const reference = data.reference as string;
+  return { status: "success", reference, studentName, monthLabel, receiptUrl: receiptUrl(reference) };
 }
