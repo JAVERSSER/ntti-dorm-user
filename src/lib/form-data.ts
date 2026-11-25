@@ -17,6 +17,14 @@ export type FormOptions = {
 /** Default QR (ships with the app); replaced when an admin uploads one in Settings. */
 const FALLBACK_QR = "/payment/qr.jpg";
 
+/** Public URL of the current payment QR (admin upload, else the built-in one). */
+export async function getQrUrl(): Promise<string> {
+  const supabase = db();
+  const { data } = await supabase.from("app_settings").select("payment_qr_path").eq("id", 1).maybeSingle();
+  const qrPath = data?.payment_qr_path as string | null | undefined;
+  return qrPath ? supabase.storage.from("payment-qr").getPublicUrl(qrPath).data.publicUrl : FALLBACK_QR;
+}
+
 /** Active grades in admin order (Grades page). Falls back to the built-in list. */
 export async function getGrades(): Promise<string[]> {
   const { data, error } = await db().from("grades").select("name").eq("is_active", true).order("sort_order").order("name");

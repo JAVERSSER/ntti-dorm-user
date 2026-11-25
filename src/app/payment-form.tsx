@@ -298,104 +298,93 @@ function Inner({ rooms, institutions, grades, residents, qrUrl, months, onReset 
   );
 }
 
-/** Fetch the QR as a blob (uses the browser cache the <img> already filled). */
+/** Same-origin URL that serves the QR as a file download (see app/qr/download/route.ts). */
+const QR_DOWNLOAD_URL = "/qr/download";
+
+/** Fetch the QR as a blob, for the iPhone share sheet. */
 async function fetchQr(url: string): Promise<Blob> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(String(res.status));
   return res.blob();
 }
 
-/** Phone or tablet (touch-first), where the share sheet is the way to save to Photos. */
-function isMobile() {
-  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+/** iPhone / iPad: the share sheet has "Save Image" (to Photos). */
+function isIOS() {
+  return /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
 }
 
-/**
- * In-app browsers (Telegram, Facebook, Instagram, LINE, Android WebViews)
- * ignore web downloads and just open the image, so we never try one there.
- */
+/** In-app browsers (Telegram, Facebook, Instagram, LINE, Android WebViews). */
 function isInAppBrowser() {
   return /Telegram|FBAN|FBAV|Instagram|Line\/|; wv\)/i.test(navigator.userAgent);
 }
 
-type SaveStatus = "idle" | "saving" | "saved" | "hint" | "error";
+/** Start a download of the attachment URL without leaving the page. */
+function startDownload() {
+  const a = document.createElement("a");
+  a.href = QR_DOWNLOAD_URL;
+  a.download = "dormpay-qr";
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+type SaveStatus = "idle" | "saving" | "saved" | "downloading" | "hint";
 
 /**
- * QR image plus a "Save" button that saves it without opening it:
- * - phones: the system share sheet ("Save Image" puts it in Photos) — this
- *   also works inside Telegram on iPhone;
- * - in-app browsers without sharing (Telegram on Android): highlight the QR
- *   and tell the user to press and hold it, because a download would open it;
- * - computers: a normal file download (a blob, because <a download> is
- *   ignored for the Supabase Storage origin).
- * The image is fetched in the background on page load so tapping is instant.
+ * QR image plus a "Save" button that saves it without opening it, in any browser:
+ * - iPhone / iPad: the system share sheet ("Save Image" puts it in Photos),
+ *   also inside Telegram; falls back to the download link.
+ * - Everything else (Chrome, Vivo / Samsung / Mi / Opera / Firefox / Edge
+ *   browsers, Telegram on Android, computers): /qr/download, a same-origin URL
+ *   sent as an attachment. Browsers and Android WebViews download that instead
+ *   of opening it, and the page stays put.
+ * In-app browsers also get a "press and hold the QR" tip as a backup.
  */
 function SaveQrButton({ qrUrl }: { qrUrl: string }) {
   const [status, setStatus] = useState<SaveStatus>("idle");
   const blobRef = useRef<Promise<Blob> | null>(null);
 
+  // On iPhone, fetch the image ahead of time so the share sheet opens instantly
+  // (Safari only allows share() shortly after the tap).
   useEffect(() => {
+    if (!isIOS()) return;
     const p = fetchQr(qrUrl);
-    p.catch(() => {}); // retried on tap if this fails
+    p.catch(() => {});
     blobRef.current = p;
   }, [qrUrl]);
 
   useEffect(() => {
     if (status === "idle" || status === "saving") return;
-    const t = setTimeout(() => setStatus("idle"), status === "hint" ? 6000 : 3000);
+    const t = setTimeout(() => setStatus("idle"), status === "saved" ? 3000 : 6000);
     return () => clearTimeout(t);
   }, [status]);
 
-  async function getBlob() {
-    try {
-      return await (blobRef.current ?? fetchQr(qrUrl));
-    } catch {
-      blobRef.current = fetchQr(qrUrl); // background fetch failed: try once more
-      return blobRef.current;
-    }
+  function download() {
+    startDownload();
+    setStatus(isInAppBrowser() ? "hint" : "downloading");
   }
 
   async function save() {
     if (status === "saving") return;
+    if (!isIOS()) return download();
+
     setStatus("saving");
     try {
-      const blob = await getBlob();
+      const blob = await (blobRef.current ?? fetchQr(qrUrl));
       const ext = blob.type.includes("png") ? "png" : blob.type.includes("webp") ? "webp" : "jpg";
-      const name = `dormpay-qr.${ext}`;
-
-      if (isMobile()) {
-        const file = new File([blob], name, { type: blob.type || "image/jpeg" });
-        if (navigator.canShare?.({ files: [file] })) {
-          try {
-            await navigator.share({ files: [file] });
-            setStatus("saved");
-          } catch (err) {
-            // User closed the sheet: nothing to report.
-            setStatus(err instanceof DOMException && err.name === "AbortError" ? "idle" : "hint");
-          }
-          return;
-        }
-        if (isInAppBrowser()) {
-          setStatus("hint");
-          return;
-        }
-      }
-
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      const file = new File([blob], `dormpay-qr.${ext}`, { type: blob.type || "image/jpeg" });
+      if (!navigator.canShare?.({ files: [file] })) return download();
+      await navigator.share({ files: [file] });
       setStatus("saved");
-    } catch {
-      setStatus("hint");
+    } catch (err) {
+      // User closed the sheet: nothing to report. Anything else: download instead.
+      if (err instanceof DOMException && err.name === "AbortError") setStatus("idle");
+      else download();
     }
   }
 
-  const showToast = status === "saved" || status === "hint" || status === "error";
+  const showToast = status !== "idle" && status !== "saving";
 
   return (
     <>
@@ -414,9 +403,9 @@ function SaveQrButton({ qrUrl }: { qrUrl: string }) {
           <>
             <Spinner label="Saving" /> Saving…
           </>
-        ) : status === "saved" ? (
+        ) : status === "saved" || status === "downloading" ? (
           <>
-            <CheckCircle2 className="size-5 text-emerald-600" aria-hidden /> Saved
+            <CheckCircle2 className="size-5 text-emerald-600" aria-hidden /> {status === "saved" ? "Saved" : "Downloading"}
           </>
         ) : (
           <>
@@ -433,19 +422,14 @@ function SaveQrButton({ qrUrl }: { qrUrl: string }) {
           showToast ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0",
         )}
       >
-        {status === "hint" ? (
-          <span className="flex max-w-sm items-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg">
-            <Download className="size-5 shrink-0 text-brand-200" aria-hidden /> Press and hold the QR image above, then tap “Save image”.
-          </span>
-        ) : status === "error" ? (
-          <span className="flex items-center gap-2 rounded-full bg-red-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg">
-            <X className="size-5" aria-hidden /> Could not save. Long-press the QR to save it.
-          </span>
-        ) : (
-          <span className="flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white shadow-lg">
-            <CheckCircle2 className="size-5 text-emerald-400" aria-hidden /> QR image saved to your phone
-          </span>
-        )}
+        <span className="flex max-w-sm items-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg">
+          <CheckCircle2 className="size-5 shrink-0 text-emerald-400" aria-hidden />
+          {status === "hint"
+            ? "Downloading… If nothing happens, press and hold the QR, then tap “Save image”."
+            : status === "downloading"
+              ? "Downloading QR image… check your Downloads."
+              : "QR image saved to your phone"}
+        </span>
       </div>
     </>
   );
