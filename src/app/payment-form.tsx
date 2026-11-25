@@ -330,7 +330,7 @@ function startDownload(url: string) {
   a.remove();
 }
 
-type SaveStatus = "idle" | "downloading" | "hint" | "ios" | "already";
+type SaveStatus = "idle" | "downloading" | "hint" | "ios";
 
 /**
  * Download a same-origin attachment URL (/qr/download, /receipt/…) in every
@@ -345,7 +345,7 @@ function useDownload(url: string) {
 
   useEffect(() => {
     if (status === "idle") return;
-    const t = setTimeout(() => setStatus("idle"), status === "ios" ? 8000 : status === "already" ? 3000 : 6000);
+    const t = setTimeout(() => setStatus("idle"), status === "ios" ? 8000 : 6000);
     return () => clearTimeout(t);
   }, [status]);
 
@@ -354,7 +354,7 @@ function useDownload(url: string) {
     setStatus(isIOS() ? "ios" : isInAppBrowser() ? "hint" : "downloading");
   }
 
-  return { status, start, setStatus };
+  return { status, start };
 }
 
 /** Pulsing ring on the image while the "press and hold" tip shows. */
@@ -390,9 +390,7 @@ function DownloadToast({ status, what }: { status: SaveStatus; what: string }) {
     >
       <span className="flex max-w-sm items-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg">
         <CheckCircle2 className="size-5 shrink-0 text-emerald-400" aria-hidden />
-        {status === "already"
-          ? `${what === "QR" ? "QR" : "Receipt"} already saved on this phone.`
-          : status === "ios"
+        {status === "ios"
           ? `Tap “Download” to save. Or press and hold the ${what}, then tap “Save to Photos”.`
           : status === "hint"
             ? `Downloading… If nothing happens, press and hold the ${what}, then tap “Save image”.`
@@ -404,12 +402,11 @@ function DownloadToast({ status, what }: { status: SaveStatus; what: string }) {
 
 /**
  * QR image plus a "Save QR image" button (see useDownload). A copy of the QR
- * is kept silently in the browser as soon as the page opens. Once this QR was
- * saved to the phone, tapping again just says "already saved" — no download,
- * no question. A new QR from the admin is saved again.
+ * is kept silently in the browser as soon as the page opens. Every tap
+ * downloads it; once saved, the button turns green so the student can see it.
  */
 function SaveQrButton({ qrUrl }: { qrUrl: string }) {
-  const { status, start, setStatus } = useDownload(QR_DOWNLOAD_URL);
+  const { status, start } = useDownload(QR_DOWNLOAD_URL);
   const alreadySaved = useQrAlreadySaved(qrUrl);
   const storedCopy = useStoredQrImage(qrUrl);
   const [broken, setBroken] = useState(false);
@@ -419,7 +416,6 @@ function SaveQrButton({ qrUrl }: { qrUrl: string }) {
   }, [qrUrl]);
 
   function save() {
-    if (alreadySaved) return setStatus("already");
     start();
     markQrSaved(qrUrl);
   }
@@ -435,7 +431,7 @@ function SaveQrButton({ qrUrl }: { qrUrl: string }) {
       />
       {alreadySaved && status === "idle" ? (
         <button type="button" onClick={save} className={buttonClass("secondary", "w-full border-emerald-300 text-emerald-700")}>
-          <CheckCircle2 className="size-5" aria-hidden /> QR saved on this phone
+          <CheckCircle2 className="size-5" aria-hidden /> QR saved · Tap to save again
         </button>
       ) : (
         <DownloadButton status={status} onClick={save} label="Save QR image" />
