@@ -4,6 +4,7 @@ import { CheckCircle2, Download, ImageUp, Send, X } from "lucide-react";
 import { useActionState, useEffect, useRef, useState, useTransition, type FormEvent, type ReactNode } from "react";
 import { Alert, buttonClass, Card, cn, Spinner } from "@/components/ui";
 import { MAX_SLIP_BYTES } from "@/lib/options";
+import { markQrSaved, removeReceipt, saveReceipt, storeQrImage, useQrAlreadySaved, useSavedReceipts, useStoredQrImage, type SavedReceipt } from "@/lib/local-saves";
 import { submitPayment, type SubmitState } from "./actions";
 
 type Resident = { room: string; name: string; grade: string; institution: string };
@@ -69,7 +70,12 @@ async function shrinkImage(file: File): Promise<File> {
 
 export function PaymentForm(props: Props) {
   const [formKey, setFormKey] = useState(0);
-  return <Inner key={formKey} {...props} onReset={() => setFormKey((k) => k + 1)} />;
+  return (
+    <div className="space-y-6">
+      <Inner key={formKey} {...props} onReset={() => setFormKey((k) => k + 1)} />
+      <MyReceipts />
+    </div>
+  );
 }
 
 function Inner({ rooms, institutions, grades, residents, qrUrl, months, onReset }: Props & { onReset: () => void }) {
@@ -112,7 +118,9 @@ function Inner({ rooms, institutions, grades, residents, qrUrl, months, onReset 
         <p className="rounded-xl bg-slate-50 py-3 text-sm text-slate-600">
           Reference <span className="ml-1 font-mono text-lg font-bold tracking-wider text-slate-900">{state.reference}</span>
         </p>
-        <ReceiptSaver url={state.receiptUrl} />
+        <ReceiptSaver
+          receipt={{ reference: state.reference, studentName: state.studentName, room: state.room, monthLabel: state.monthLabel, receiptUrl: state.receiptUrl }}
+        />
         <button type="button" onClick={onReset} className={buttonClass("secondary", "w-full")}>
           Submit another payment
         </button>
@@ -322,7 +330,7 @@ function startDownload(url: string) {
   a.remove();
 }
 
-type SaveStatus = "idle" | "downloading" | "hint" | "ios";
+type SaveStatus = "idle" | "downloading" | "hint" | "ios" | "already";
 
 /**
  * Download a same-origin attachment URL (/qr/download, /receipt/…) in every
@@ -337,7 +345,7 @@ function useDownload(url: string) {
 
   useEffect(() => {
     if (status === "idle") return;
-    const t = setTimeout(() => setStatus("idle"), status === "ios" ? 8000 : 6000);
+    const t = setTimeout(() => setStatus("idle"), status === "ios" ? 8000 : status === "already" ? 3000 : 6000);
     return () => clearTimeout(t);
   }, [status]);
 
@@ -346,7 +354,7 @@ function useDownload(url: string) {
     setStatus(isIOS() ? "ios" : isInAppBrowser() ? "hint" : "downloading");
   }
 
-  return { status, start };
+  return { status, start, setStatus };
 }
 
 /** Pulsing ring on the image while the "press and hold" tip shows. */
@@ -382,7 +390,9 @@ function DownloadToast({ status, what }: { status: SaveStatus; what: string }) {
     >
       <span className="flex max-w-sm items-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg">
         <CheckCircle2 className="size-5 shrink-0 text-emerald-400" aria-hidden />
-        {status === "ios"
+        {status === "already"
+          ? `${what === "QR" ? "QR" : "Receipt"} already saved on this phone.`
+          : status === "ios"
           ? `Tap “Download” to save. Or press and hold the ${what}, then tap “Save to Photos”.`
           : status === "hint"
             ? `Downloading… If nothing happens, press and hold the ${what}, then tap “Save image”.`
@@ -392,34 +402,62 @@ function DownloadToast({ status, what }: { status: SaveStatus; what: string }) {
   );
 }
 
-/** QR image plus a "Save QR image" button (see useDownload). */
+/**
+ * QR image plus a "Save QR image" button (see useDownload). A copy of the QR
+ * is kept silently in the browser as soon as the page opens. Once this QR was
+ * saved to the phone, tapping again just says "already saved" — no download,
+ * no question. A new QR from the admin is saved again.
+ */
 function SaveQrButton({ qrUrl }: { qrUrl: string }) {
-  const { status, start } = useDownload(QR_DOWNLOAD_URL);
+  const { status, start, setStatus } = useDownload(QR_DOWNLOAD_URL);
+  const alreadySaved = useQrAlreadySaved(qrUrl);
+  const storedCopy = useStoredQrImage(qrUrl);
+  const [broken, setBroken] = useState(false);
+
+  useEffect(() => {
+    void storeQrImage(qrUrl, QR_DOWNLOAD_URL);
+  }, [qrUrl]);
+
+  function save() {
+    if (alreadySaved) return setStatus("already");
+    start();
+    markQrSaved(qrUrl);
+  }
+
   return (
     <>
       {/* eslint-disable-next-line @next/next/no-img-element -- admin-managed image from Supabase Storage */}
       <img
-        src={qrUrl}
+        src={broken && storedCopy ? storedCopy : qrUrl}
+        onError={() => setBroken(true)}
         alt="Dormitory ABA KHQR code"
         className={cn("mx-auto w-full max-w-xs rounded-xl border border-slate-200 transition-shadow [-webkit-touch-callout:default]", highlightClass(status))}
       />
-      <DownloadButton status={status} onClick={start} label="Save QR image" />
+      {alreadySaved && status === "idle" ? (
+        <button type="button" onClick={save} className={buttonClass("secondary", "w-full border-emerald-300 text-emerald-700")}>
+          <CheckCircle2 className="size-5" aria-hidden /> QR saved on this phone
+        </button>
+      ) : (
+        <DownloadButton status={status} onClick={save} label="Save QR image" />
+      )}
       <DownloadToast status={status} what="QR" />
     </>
   );
 }
 
 /**
- * Receipt image on the success screen. It downloads by itself as soon as the
- * payment is submitted, and the button saves it again.
+ * Receipt image on the success screen. As soon as the payment is submitted it
+ * is kept in the browser (My receipts) and downloaded to the phone; the
+ * button saves it again.
  */
-function ReceiptSaver({ url }: { url: string }) {
-  const { status, start } = useDownload(url);
+function ReceiptSaver({ receipt }: { receipt: Omit<SavedReceipt, "savedAt"> }) {
+  const { status, start } = useDownload(receipt.receiptUrl);
   const started = useRef(false);
 
   useEffect(() => {
     if (started.current) return; // once, even in React Strict Mode
     started.current = true;
+    saveReceipt(receipt);
     start();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on the success screen
   }, []);
@@ -428,13 +466,55 @@ function ReceiptSaver({ url }: { url: string }) {
     <>
       {/* eslint-disable-next-line @next/next/no-img-element -- generated receipt PNG */}
       <img
-        src={url}
+        src={receipt.receiptUrl}
         alt="Your payment receipt"
         className={cn("mx-auto w-full max-w-60 rounded-xl border border-slate-200 transition-shadow [-webkit-touch-callout:default]", highlightClass(status))}
       />
       <DownloadButton status={status} onClick={start} label="Save receipt" />
       <DownloadToast status={status} what="receipt" />
     </>
+  );
+}
+
+/** Receipts kept in this browser, newest first. Hidden until there is one. */
+function MyReceipts() {
+  const receipts = useSavedReceipts();
+  if (receipts.length === 0) return null;
+  return (
+    <Card className="space-y-3">
+      <h2 className="text-lg font-bold">My receipts on this phone</h2>
+      <ul className="divide-y divide-slate-100">
+        {receipts.map((r) => (
+          <MyReceiptRow key={r.reference} receipt={r} />
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
+function MyReceiptRow({ receipt }: { receipt: SavedReceipt }) {
+  const { status, start } = useDownload(receipt.receiptUrl);
+  return (
+    <li className="flex items-center gap-3 py-3">
+      <div className="min-w-0 flex-1">
+        <p className="truncate font-semibold text-slate-900">{receipt.monthLabel}</p>
+        <p className="truncate text-sm text-slate-500">
+          {receipt.studentName} · Room {receipt.room} · <span className="font-mono">{receipt.reference}</span>
+        </p>
+      </div>
+      <button type="button" onClick={start} className={buttonClass("secondary", "min-h-10 px-3 text-sm")} aria-label={`Save receipt ${receipt.reference}`}>
+        {status === "idle" ? <Download className="size-4" aria-hidden /> : <CheckCircle2 className="size-4 text-emerald-600" aria-hidden />} Save
+      </button>
+      <button
+        type="button"
+        onClick={() => removeReceipt(receipt.reference)}
+        className="rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+        aria-label={`Remove receipt ${receipt.reference} from this phone`}
+      >
+        <X className="size-4" aria-hidden />
+      </button>
+      <DownloadToast status={status} what="receipt" />
+    </li>
   );
 }
 
