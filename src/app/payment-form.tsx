@@ -301,6 +301,11 @@ function Inner({ rooms, institutions, grades, residents, qrUrl, months, onReset 
 /** Same-origin URL that serves the QR as a file download (see app/qr/download/route.ts). */
 const QR_DOWNLOAD_URL = "/qr/download";
 
+/** iPhone / iPad. Every iOS browser (Safari, Chrome, Firefox, Edge, in-app) is WebKit. */
+function isIOS() {
+  return /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+}
+
 /** In-app browsers (Telegram, Facebook, Instagram, LINE, Android WebViews). */
 function isInAppBrowser() {
   return /Telegram|FBAN|FBAV|Instagram|Line\/|; wv\)/i.test(navigator.userAgent);
@@ -317,7 +322,7 @@ function startDownload() {
   a.remove();
 }
 
-type SaveStatus = "idle" | "downloading" | "hint";
+type SaveStatus = "idle" | "downloading" | "hint" | "ios";
 
 /**
  * QR image plus a "Save" button that downloads it without opening it, in every
@@ -325,19 +330,22 @@ type SaveStatus = "idle" | "downloading" | "hint";
  * Edge, Telegram, computers): it uses /qr/download, a same-origin URL sent as
  * an attachment, which browsers download instead of showing, and the page
  * stays put. In-app browsers also get a "press and hold the QR" tip as a backup.
+ * iPhone browsers always ask "Download?" first (Apple's rule, cannot be
+ * skipped), and some in-app ones (Facebook, Instagram) cannot download at all,
+ * so on iPhone the tip also offers long-press → "Save to Photos".
  */
 function SaveQrButton({ qrUrl }: { qrUrl: string }) {
   const [status, setStatus] = useState<SaveStatus>("idle");
 
   useEffect(() => {
     if (status === "idle") return;
-    const t = setTimeout(() => setStatus("idle"), 6000);
+    const t = setTimeout(() => setStatus("idle"), status === "ios" ? 8000 : 6000);
     return () => clearTimeout(t);
   }, [status]);
 
   function save() {
     startDownload();
-    setStatus(isInAppBrowser() ? "hint" : "downloading");
+    setStatus(isIOS() ? "ios" : isInAppBrowser() ? "hint" : "downloading");
   }
 
   const showToast = status !== "idle";
@@ -349,8 +357,8 @@ function SaveQrButton({ qrUrl }: { qrUrl: string }) {
         src={qrUrl}
         alt="Dormitory ABA KHQR code"
         className={cn(
-          "mx-auto w-full max-w-xs rounded-xl border border-slate-200 transition-shadow",
-          status === "hint" && "animate-pulse ring-4 ring-brand-500 ring-offset-2",
+          "mx-auto w-full max-w-xs rounded-xl border border-slate-200 transition-shadow [-webkit-touch-callout:default]",
+          (status === "hint" || status === "ios") && "animate-pulse ring-4 ring-brand-500 ring-offset-2",
         )}
       />
 
@@ -376,7 +384,9 @@ function SaveQrButton({ qrUrl }: { qrUrl: string }) {
       >
         <span className="flex max-w-sm items-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg">
           <CheckCircle2 className="size-5 shrink-0 text-emerald-400" aria-hidden />
-          {status === "hint"
+          {status === "ios"
+            ? "Tap “Download” to save. Or press and hold the QR, then tap “Save to Photos”."
+            : status === "hint"
             ? "Downloading… If nothing happens, press and hold the QR, then tap “Save image”."
             : "Downloading QR image… check your Downloads."}
         </span>
