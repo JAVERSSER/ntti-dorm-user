@@ -1,7 +1,7 @@
 "use client";
 
 import { CheckCircle2, Download, ImageUp, Send, X } from "lucide-react";
-import { useActionState, useEffect, useState, useTransition, type FormEvent, type ReactNode } from "react";
+import { useActionState, useEffect, useRef, useState, useTransition, type FormEvent, type ReactNode } from "react";
 import { Alert, buttonClass, Card, cn, Spinner } from "@/components/ui";
 import { MAX_SLIP_BYTES } from "@/lib/options";
 import { submitPayment, type SubmitState } from "./actions";
@@ -236,11 +236,7 @@ function Inner({ rooms, institutions, grades, residents, qrUrl, months, onReset 
       <Card className="space-y-4">
         <StepTitle n={2}>Scan to pay</StepTitle>
         <p className="text-sm text-slate-600">Open ABA Mobile (or any KHQR banking app), scan this QR and pay your dormitory fee.</p>
-        {/* eslint-disable-next-line @next/next/no-img-element -- admin-managed image from Supabase Storage */}
-        <img src={qrUrl} alt="Dormitory ABA KHQR code" className="mx-auto w-full max-w-xs rounded-xl border border-slate-200" />
-        <a href={qrUrl} download className={buttonClass("secondary", "w-full")}>
-          <Download className="size-5" aria-hidden /> Save QR image
-        </a>
+        <SaveQrButton qrUrl={qrUrl} />
       </Card>
 
       <Card className="space-y-4">
@@ -299,6 +295,105 @@ function Inner({ rooms, institutions, grades, residents, qrUrl, months, onReset 
         )}
       </button>
     </form>
+  );
+}
+
+/** Fetch the QR as a blob (uses the browser cache the <img> already filled). */
+async function fetchQr(url: string): Promise<Blob> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(String(res.status));
+  return res.blob();
+}
+
+/**
+ * QR image plus a "Save" button that downloads it as a file without opening
+ * it. The QR usually lives on Supabase Storage (another origin), where
+ * browsers ignore <a download> and just open the image, so we download a blob
+ * instead. The blob is fetched in the background as soon as the page loads,
+ * so tapping Save is instant.
+ */
+function SaveQrButton({ qrUrl }: { qrUrl: string }) {
+  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const blobRef = useRef<Promise<Blob> | null>(null);
+
+  useEffect(() => {
+    const p = fetchQr(qrUrl);
+    p.catch(() => {}); // retried on tap if this fails
+    blobRef.current = p;
+  }, [qrUrl]);
+
+  useEffect(() => {
+    if (status !== "saved" && status !== "error") return;
+    const t = setTimeout(() => setStatus("idle"), 3000);
+    return () => clearTimeout(t);
+  }, [status]);
+
+  async function save() {
+    if (status === "saving") return;
+    setStatus("saving");
+    try {
+      let blob: Blob;
+      try {
+        blob = await (blobRef.current ?? fetchQr(qrUrl));
+      } catch {
+        blobRef.current = fetchQr(qrUrl); // background fetch failed: try once more
+        blob = await blobRef.current;
+      }
+      const ext = blob.type.includes("png") ? "png" : blob.type.includes("webp") ? "webp" : "jpg";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `dormpay-qr.${ext}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      setStatus("saved");
+    } catch {
+      setStatus("error");
+    }
+  }
+
+  return (
+    <>
+      {/* eslint-disable-next-line @next/next/no-img-element -- admin-managed image from Supabase Storage */}
+      <img src={qrUrl} alt="Dormitory ABA KHQR code" className="mx-auto w-full max-w-xs rounded-xl border border-slate-200" />
+
+      <button type="button" onClick={save} disabled={status === "saving"} className={buttonClass("secondary", "w-full")}>
+        {status === "saving" ? (
+          <>
+            <Spinner label="Saving" /> Saving…
+          </>
+        ) : status === "saved" ? (
+          <>
+            <CheckCircle2 className="size-5 text-emerald-600" aria-hidden /> Saved
+          </>
+        ) : (
+          <>
+            <Download className="size-5" aria-hidden /> Save QR image
+          </>
+        )}
+      </button>
+
+      <div
+        role="status"
+        aria-live="polite"
+        className={cn(
+          "pointer-events-none fixed inset-x-0 bottom-6 z-50 flex justify-center px-4 transition-all duration-300",
+          status === "saved" || status === "error" ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0",
+        )}
+      >
+        {status === "error" ? (
+          <span className="flex items-center gap-2 rounded-full bg-red-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg">
+            <X className="size-5" aria-hidden /> Could not save. Long-press the QR to save it.
+          </span>
+        ) : (
+          <span className="flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white shadow-lg">
+            <CheckCircle2 className="size-5 text-emerald-400" aria-hidden /> QR image saved to your phone
+          </span>
+        )}
+      </div>
+    </>
   );
 }
 
