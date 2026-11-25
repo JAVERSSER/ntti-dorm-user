@@ -1,7 +1,7 @@
 "use client";
 
 import { CheckCircle2, Download, ImageUp, Send, X } from "lucide-react";
-import { useActionState, useEffect, useRef, useState, useTransition, type FormEvent, type ReactNode } from "react";
+import { useActionState, useEffect, useState, useTransition, type FormEvent, type ReactNode } from "react";
 import { Alert, buttonClass, Card, cn, Spinner } from "@/components/ui";
 import { MAX_SLIP_BYTES } from "@/lib/options";
 import { submitPayment, type SubmitState } from "./actions";
@@ -301,18 +301,6 @@ function Inner({ rooms, institutions, grades, residents, qrUrl, months, onReset 
 /** Same-origin URL that serves the QR as a file download (see app/qr/download/route.ts). */
 const QR_DOWNLOAD_URL = "/qr/download";
 
-/** Fetch the QR as a blob, for the iPhone share sheet. */
-async function fetchQr(url: string): Promise<Blob> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(String(res.status));
-  return res.blob();
-}
-
-/** iPhone / iPad: the share sheet has "Save Image" (to Photos). */
-function isIOS() {
-  return /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
-}
-
 /** In-app browsers (Telegram, Facebook, Instagram, LINE, Android WebViews). */
 function isInAppBrowser() {
   return /Telegram|FBAN|FBAV|Instagram|Line\/|; wv\)/i.test(navigator.userAgent);
@@ -329,62 +317,30 @@ function startDownload() {
   a.remove();
 }
 
-type SaveStatus = "idle" | "saving" | "saved" | "downloading" | "hint";
+type SaveStatus = "idle" | "downloading" | "hint";
 
 /**
- * QR image plus a "Save" button that saves it without opening it, in any browser:
- * - iPhone / iPad: the system share sheet ("Save Image" puts it in Photos),
- *   also inside Telegram; falls back to the download link.
- * - Everything else (Chrome, Vivo / Samsung / Mi / Opera / Firefox / Edge
- *   browsers, Telegram on Android, computers): /qr/download, a same-origin URL
- *   sent as an attachment. Browsers and Android WebViews download that instead
- *   of opening it, and the page stays put.
- * In-app browsers also get a "press and hold the QR" tip as a backup.
+ * QR image plus a "Save" button that downloads it without opening it, in every
+ * browser (Chrome, Safari on iPhone, Vivo / Samsung / Mi / Opera / Firefox /
+ * Edge, Telegram, computers): it uses /qr/download, a same-origin URL sent as
+ * an attachment, which browsers download instead of showing, and the page
+ * stays put. In-app browsers also get a "press and hold the QR" tip as a backup.
  */
 function SaveQrButton({ qrUrl }: { qrUrl: string }) {
   const [status, setStatus] = useState<SaveStatus>("idle");
-  const blobRef = useRef<Promise<Blob> | null>(null);
-
-  // On iPhone, fetch the image ahead of time so the share sheet opens instantly
-  // (Safari only allows share() shortly after the tap).
-  useEffect(() => {
-    if (!isIOS()) return;
-    const p = fetchQr(qrUrl);
-    p.catch(() => {});
-    blobRef.current = p;
-  }, [qrUrl]);
 
   useEffect(() => {
-    if (status === "idle" || status === "saving") return;
-    const t = setTimeout(() => setStatus("idle"), status === "saved" ? 3000 : 6000);
+    if (status === "idle") return;
+    const t = setTimeout(() => setStatus("idle"), 6000);
     return () => clearTimeout(t);
   }, [status]);
 
-  function download() {
+  function save() {
     startDownload();
     setStatus(isInAppBrowser() ? "hint" : "downloading");
   }
 
-  async function save() {
-    if (status === "saving") return;
-    if (!isIOS()) return download();
-
-    setStatus("saving");
-    try {
-      const blob = await (blobRef.current ?? fetchQr(qrUrl));
-      const ext = blob.type.includes("png") ? "png" : blob.type.includes("webp") ? "webp" : "jpg";
-      const file = new File([blob], `dormpay-qr.${ext}`, { type: blob.type || "image/jpeg" });
-      if (!navigator.canShare?.({ files: [file] })) return download();
-      await navigator.share({ files: [file] });
-      setStatus("saved");
-    } catch (err) {
-      // User closed the sheet: nothing to report. Anything else: download instead.
-      if (err instanceof DOMException && err.name === "AbortError") setStatus("idle");
-      else download();
-    }
-  }
-
-  const showToast = status !== "idle" && status !== "saving";
+  const showToast = status !== "idle";
 
   return (
     <>
@@ -398,18 +354,14 @@ function SaveQrButton({ qrUrl }: { qrUrl: string }) {
         )}
       />
 
-      <button type="button" onClick={save} disabled={status === "saving"} className={buttonClass("secondary", "w-full")}>
-        {status === "saving" ? (
+      <button type="button" onClick={save} className={buttonClass("secondary", "w-full")}>
+        {status === "idle" ? (
           <>
-            <Spinner label="Saving" /> Saving…
-          </>
-        ) : status === "saved" || status === "downloading" ? (
-          <>
-            <CheckCircle2 className="size-5 text-emerald-600" aria-hidden /> {status === "saved" ? "Saved" : "Downloading"}
+            <Download className="size-5" aria-hidden /> Save QR image
           </>
         ) : (
           <>
-            <Download className="size-5" aria-hidden /> Save QR image
+            <CheckCircle2 className="size-5 text-emerald-600" aria-hidden /> Downloading
           </>
         )}
       </button>
@@ -426,9 +378,7 @@ function SaveQrButton({ qrUrl }: { qrUrl: string }) {
           <CheckCircle2 className="size-5 shrink-0 text-emerald-400" aria-hidden />
           {status === "hint"
             ? "Downloading… If nothing happens, press and hold the QR, then tap “Save image”."
-            : status === "downloading"
-              ? "Downloading QR image… check your Downloads."
-              : "QR image saved to your phone"}
+            : "Downloading QR image… check your Downloads."}
         </span>
       </div>
     </>
