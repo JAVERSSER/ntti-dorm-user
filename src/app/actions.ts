@@ -5,7 +5,7 @@ import { env } from "@/lib/env";
 import { payableMonths } from "@/lib/options";
 import { getGrades, getMonthlyFee } from "@/lib/form-data";
 import { createKhqr, newTranId } from "@/lib/payway";
-import { syncPayment, type PaymentProgress } from "@/lib/payments";
+import { findPaidForMonth, rosterName, syncPayment, syncPendingPayments, type PaymentProgress } from "@/lib/payments";
 
 type Field = "room" | "month" | "student_name" | "grade" | "institution";
 
@@ -34,14 +34,14 @@ export async function startPayment(_prev: StartState, formData: FormData): Promi
 
   const room = text(formData, "room");
   const month = text(formData, "month");
-  const studentName = text(formData, "student_name");
+  const typedName = text(formData, "student_name");
   const grade = text(formData, "grade");
   const institution = text(formData, "institution");
 
   const fields: Partial<Record<Field, string>> = {};
   if (!room) fields.room = "Please choose your room.";
   if (!payableMonths().some((m) => m.value === month)) fields.month = "Please choose the month you are paying for.";
-  if (studentName.length < 2 || studentName.length > 120) fields.student_name = "Please enter your full name.";
+  if (typedName.length < 2 || typedName.length > 120) fields.student_name = "Please enter your full name.";
   if (!grade || !(await getGrades()).includes(grade)) fields.grade = "Please choose your grade.";
   if (!institution) fields.institution = "Please choose where you study.";
   if (Object.keys(fields).length) return { status: "error", message: "Please check the highlighted fields.", fields };
@@ -69,6 +69,26 @@ export async function startPayment(_prev: StartState, formData: FormData): Promi
   if (fee === null) return { status: "error", message: "The dormitory fee is not set yet. Please contact the dormitory office." };
 
   const monthLabel = payableMonths().find((m) => m.value === month)?.label ?? month;
+  // A typed name that matches someone in this room's resident list is saved as the list spells it.
+  const studentName = await rosterName(roomRow.data.name as string, typedName);
+
+  // Already paid this month? First record any earlier QR of theirs that was paid
+  // but never confirmed (page closed too soon), then look for an approved payment.
+  const who = { room, studentName, forMonth: `${month}-01` };
+  try {
+    await syncPendingPayments(who);
+    const already = await findPaidForMonth(who);
+    if (already) {
+      return {
+        status: "error",
+        message: `${studentName} has already paid for ${monthLabel} (reference ${already.reference}). You do not need to pay again. Contact the dormitory office if this is wrong.`,
+      };
+    }
+  } catch (error) {
+    console.error("[start] already paid check", (error as Error).message);
+    return { status: "error", message: "Server error. Please try again in a moment." };
+  }
+
   const tranId = newTranId();
   const lifetime = env.paywayQrLifetimeMinutes;
 

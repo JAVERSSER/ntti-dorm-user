@@ -107,3 +107,80 @@ export async function syncPayment(tranId: string): Promise<PaymentProgress | nul
   await supabase.from("payway_transactions").update({ status: "paid", submission_id: submissionId }).eq("tran_id", tranId);
   return paidResult(tx, submissionId!);
 }
+
+/** Escape a value for an exact, case-insensitive ILIKE match. */
+function ilikeExact(value: string): string {
+  return value.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+export type StudentMonth = { room: string; studentName: string; forMonth: string /* YYYY-MM-01 */ };
+
+/**
+ * Comparison key for a person's name: case, extra spaces and word order are
+ * ignored, so "Sok Dara", "sok  dara" and "Dara Sok" are the same student.
+ */
+export function nameKey(name: string): string {
+  return name.toLowerCase().split(/\s+/).filter(Boolean).sort().join(" ");
+}
+
+/** The approved payment this student already has for this month, if any. */
+export async function findPaidForMonth(q: StudentMonth): Promise<{ reference: string } | null> {
+  const { data, error } = await db()
+    .from("payment_submissions")
+    .select("reference, student_name")
+    .eq("status", "approved")
+    .eq("for_month", q.forMonth)
+    .ilike("room", ilikeExact(q.room))
+    .limit(1000);
+  if (error) throw error;
+  const key = nameKey(q.studentName);
+  const hit = data.find((r) => nameKey(r.student_name as string) === key);
+  return hit ? { reference: hit.reference as string } : null;
+}
+
+/**
+ * The resident list's spelling of a name typed for this room, or the typed
+ * name itself when nobody in that room matches it.
+ */
+export async function rosterName(room: string, typed: string): Promise<string> {
+  const { data, error } = await db().from("dorm_residents").select("full_name").eq("is_active", true).ilike("room", ilikeExact(room)).limit(500);
+  if (error) {
+    console.error("[roster name]", error.message); // the list is optional: keep what was typed
+    return typed;
+  }
+  const key = nameKey(typed);
+  return (data.find((r) => nameKey(r.full_name as string) === key)?.full_name as string | undefined) ?? typed;
+}
+
+/** How far back unconfirmed QRs are re-checked with PayWay (the admin cleanup deletes them after 7 days). */
+const RECHECK_DAYS = 3;
+
+/**
+ * Re-check QRs that are still "pending" in our database. A student may pay and
+ * close the page before it sees the payment (and without a public callback URL
+ * PayWay cannot tell us), so this records any such payment. Pass a student and
+ * month to check only theirs; without it, every recent pending QR is checked.
+ * Returns how many were found paid.
+ */
+export async function syncPendingPayments(only?: StudentMonth): Promise<number> {
+  const since = new Date(Date.now() - RECHECK_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  let query = db().from("payway_transactions").select("tran_id, student_name").eq("status", "pending").gte("created_at", since);
+  if (only) {
+    query = query.eq("for_month", only.forMonth).ilike("room", ilikeExact(only.room));
+  }
+  const { data: rows, error } = await query.order("created_at", { ascending: true }).limit(500);
+  if (error) throw error;
+  const key = only && nameKey(only.studentName);
+  const data = key ? rows.filter((r) => nameKey(r.student_name as string) === key) : rows;
+
+  let paid = 0;
+  for (const row of data) {
+    try {
+      const res = await syncPayment(row.tran_id as string);
+      if (res?.state === "paid") paid++;
+    } catch (e) {
+      console.error("[sync pending]", row.tran_id, (e as Error).message); // try again next time
+    }
+  }
+  return paid;
+}
