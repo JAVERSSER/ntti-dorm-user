@@ -9,20 +9,18 @@ export type FormOptions = {
   grades: string[];
   /** Resident roster from admin (Residents page), so students pick their name. */
   residents: { room: string; name: string; grade: string; institution: string }[];
-  qrUrl: string;
+  /** Monthly fee in USD from admin Settings; null until an admin sets it. */
+  monthlyFee: number | null;
   /** Months the resident can pay for (the current month only). */
   months: { value: string; label: string }[];
 };
 
-/** Default QR (ships with the app); replaced when an admin uploads one in Settings. */
-const FALLBACK_QR = "/payment/qr.jpg";
-
-/** Public URL of the current payment QR (admin upload, else the built-in one). */
-export async function getQrUrl(): Promise<string> {
-  const supabase = db();
-  const { data } = await supabase.from("app_settings").select("payment_qr_path").eq("id", 1).maybeSingle();
-  const qrPath = data?.payment_qr_path as string | null | undefined;
-  return qrPath ? supabase.storage.from("payment-qr").getPublicUrl(qrPath).data.publicUrl : FALLBACK_QR;
+/** Monthly fee (USD) set in admin Settings, or null when not set yet. */
+export async function getMonthlyFee(): Promise<number | null> {
+  const { data, error } = await db().from("app_settings").select("monthly_fee_usd").eq("id", 1).maybeSingle();
+  if (error) throw error;
+  const fee = Number(data?.monthly_fee_usd);
+  return Number.isFinite(fee) && fee > 0 ? fee : null;
 }
 
 /** Active grades in admin order (Grades page). Falls back to the built-in list. */
@@ -37,10 +35,10 @@ export async function getGrades(): Promise<string[]> {
 
 export async function getFormOptions(): Promise<FormOptions> {
   const supabase = db();
-  const [rooms, institutions, settings, residents, grades] = await Promise.all([
+  const [rooms, institutions, monthlyFee, residents, grades] = await Promise.all([
     supabase.from("rooms").select("name").eq("is_active", true).order("name"),
     supabase.from("institutions").select("code, name").eq("is_active", true).order("name"),
-    supabase.from("app_settings").select("payment_qr_path").eq("id", 1).maybeSingle(),
+    getMonthlyFee(),
     supabase.from("dorm_residents").select("room, full_name, grade, institution").eq("is_active", true).order("full_name").limit(5000),
     getGrades(),
   ]);
@@ -56,9 +54,6 @@ export async function getFormOptions(): Promise<FormOptions> {
   if (rooms.error) throw rooms.error;
   if (institutions.error) throw institutions.error;
 
-  const qrPath = settings.data?.payment_qr_path as string | null | undefined;
-  const qrUrl = qrPath ? supabase.storage.from("payment-qr").getPublicUrl(qrPath).data.publicUrl : FALLBACK_QR;
-
   return {
     rooms: rooms.data.map((r) => r.name as string),
     institutions: institutions.data.map((i) => i.name as string),
@@ -69,7 +64,7 @@ export async function getFormOptions(): Promise<FormOptions> {
       grade: (r.grade as string | null) ?? "",
       institution: schoolName.get(String(r.institution ?? "").toLowerCase()) ?? "",
     })),
-    qrUrl,
+    monthlyFee,
     months: payableMonths(),
   };
 }

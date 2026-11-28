@@ -17,7 +17,7 @@ const nextConfig: NextConfig = {
   // The receipt image reads its Khmer font from disk: ship it with that route.
   outputFileTracingIncludes: { "/receipt/[reference]": ["./src/assets/fonts/**"] },
   experimental: {
-    // Payment screenshots are posted to a Server Action (max 5 MB + form overhead).
+    // Server Action body limit (kept from the screenshot upload; payments now use PayWay KHQR).
     serverActions: { bodySizeLimit: "6mb" },
   },
   turbopack: {

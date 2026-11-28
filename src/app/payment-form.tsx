@@ -1,71 +1,24 @@
 "use client";
 
-import { CheckCircle2, Download, ImageUp, Send, X } from "lucide-react";
+import { CheckCircle2, Clock, Download, QrCode, RotateCcw, Smartphone, X } from "lucide-react";
 import { useActionState, useEffect, useRef, useState, useSyncExternalStore, useTransition, type FormEvent, type ReactNode } from "react";
 import { Alert, buttonClass, Card, cn, Spinner } from "@/components/ui";
-import { MAX_SLIP_BYTES } from "@/lib/options";
-import { markQrSaved, nextDownloadName, removeReceipt, saveReceipt, storeQrImage, useQrAlreadySaved, useSavedReceipts, useStoredQrImage, type SavedReceipt } from "@/lib/local-saves";
-import { submitPayment, type SubmitState } from "./actions";
+import { nextDownloadName, removeReceipt, saveReceipt, useSavedReceipts, type SavedReceipt } from "@/lib/local-saves";
+import type { PaidResult } from "@/lib/payments";
+import { checkPayment, startPayment, type StartState } from "./actions";
 
 type Resident = { room: string; name: string; grade: string; institution: string };
-type Props = { rooms: string[]; institutions: string[]; grades: string[]; residents: Resident[]; qrUrl: string; months: { value: string; label: string }[] };
+type Props = { rooms: string[]; institutions: string[]; grades: string[]; residents: Resident[]; monthlyFee: number | null; months: { value: string; label: string }[] };
+type QrState = Extract<StartState, { status: "qr" }>;
 
 /** Value of the "my name is not in the list" choice. */
 const OTHER = "__other__";
 
-/** Longest side of the uploaded image; payment slip text stays readable at this size. */
-const SLIP_MAX_SIDE = 1280;
-/** Smallest longest side we will shrink to while chasing the target size. */
-const SLIP_MIN_SIDE = 800;
-/** Aim for about 100 KB per screenshot to keep Supabase storage tiny. */
-const SLIP_TARGET_BYTES = 100 * 1024;
+/** How often the page asks the server whether the QR was paid. */
+const POLL_MS = 3000;
 
-function encode(canvas: HTMLCanvasElement, type: string, quality: number) {
-  return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, quality));
-}
-
-/**
- * Compress every screenshot in the browser before upload: resize, then WebP
- * (JPEG on browsers that cannot encode WebP), lowering quality and size until
- * it is near SLIP_TARGET_BYTES. Falls back to the original file on failure.
- */
-async function shrinkImage(file: File): Promise<File> {
-  try {
-    const bitmap = await createImageBitmap(file);
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return file;
-
-    let side = Math.min(SLIP_MAX_SIDE, Math.max(bitmap.width, bitmap.height));
-    let best: Blob | null = null;
-
-    while (true) {
-      const scale = side / Math.max(bitmap.width, bitmap.height);
-      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-      ctx.fillStyle = "#fff"; // transparent PNGs would turn black in JPEG
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-
-      for (const quality of [0.7, 0.6, 0.5, 0.4]) {
-        let blob = await encode(canvas, "image/webp", quality);
-        // Some Safari versions silently return PNG for WebP: use JPEG there.
-        if (!blob || blob.type !== "image/webp") blob = await encode(canvas, "image/jpeg", quality);
-        if (blob && (!best || blob.size < best.size)) best = blob;
-        if (blob && blob.size <= SLIP_TARGET_BYTES) break;
-      }
-
-      if (!best || best.size <= SLIP_TARGET_BYTES || side <= SLIP_MIN_SIDE) break;
-      side = Math.max(SLIP_MIN_SIDE, Math.round(side * 0.8));
-    }
-    bitmap.close();
-
-    if (!best || best.size >= file.size) return file;
-    const ext = best.type === "image/webp" ? "webp" : "jpg";
-    return new File([best], `slip.${ext}`, { type: best.type });
-  } catch {
-    return file;
-  }
+function usd(amount: number) {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(amount);
 }
 
 export function PaymentForm(props: Props) {
@@ -78,87 +31,57 @@ export function PaymentForm(props: Props) {
   );
 }
 
-function Inner({ rooms, institutions, grades, residents, qrUrl, months, onReset }: Props & { onReset: () => void }) {
+function Inner({ rooms, institutions, grades, residents, monthlyFee, months, onReset }: Props & { onReset: () => void }) {
   const [room, setRoom] = useState("");
   const month = months[0]?.value ?? "";
   const [pickedName, setPickedName] = useState("");
   const [grade, setGrade] = useState("");
   const [institution, setInstitution] = useState("");
-  const [state, formAction, submitting] = useActionState<SubmitState, FormData>(submitPayment, { status: "idle" });
-  const [preparing, startPreparing] = useTransition();
-  const [picked, setPicked] = useState<{ file: File; url: string } | null>(null);
-  const [fileError, setFileError] = useState<string | null>(null);
-  const pending = submitting || preparing;
+  const [state, formAction, starting] = useActionState<StartState, FormData>(startPayment, { status: "idle" });
+  const [, startTransition] = useTransition();
+  const lastForm = useRef<FormData | null>(null);
+  /** QR the student closed with "Change details"; the details form shows again. */
+  const [closedTranId, setClosedTranId] = useState<string | null>(null);
+  const [paid, setPaid] = useState<PaidResult | null>(null);
 
-  const file = picked?.file ?? null;
-  const preview = picked?.url ?? null;
-
-  // Free the preview's memory when it changes or the form unmounts.
-  useEffect(() => {
-    const url = picked?.url;
-    return () => {
-      if (url) URL.revokeObjectURL(url);
-    };
-  }, [picked]);
-
-  function setFile(next: File | null) {
-    setPicked(next ? { file: next, url: URL.createObjectURL(next) } : null);
-  }
-
-  if (state.status === "success") {
+  if (paid) {
     return (
       <Card className="space-y-4 text-center">
         <CheckCircle2 className="mx-auto size-14 text-emerald-600" aria-hidden />
         <div>
-          <h2 className="text-xl font-bold">Payment submitted</h2>
+          <h2 className="text-xl font-bold">Payment received</h2>
           <p className="mt-1 text-slate-600">
-            Thank you, {state.studentName}. Your payment for <strong>{state.monthLabel}</strong> was received. The dormitory office will check your screenshot.
+            Thank you, {paid.studentName}. Your dormitory fee for <strong>{paid.monthLabel}</strong> is paid.
           </p>
         </div>
         <p className="rounded-xl bg-slate-50 py-3 text-sm text-slate-600">
-          Reference <span className="ml-1 font-mono text-lg font-bold tracking-wider text-slate-900">{state.reference}</span>
+          Reference <span className="ml-1 font-mono text-lg font-bold tracking-wider text-slate-900">{paid.reference}</span>
         </p>
-        <ReceiptSaver
-          receipt={{ reference: state.reference, studentName: state.studentName, room: state.room, monthLabel: state.monthLabel, receiptUrl: state.receiptUrl }}
-        />
+        <ReceiptSaver receipt={paid} />
         <button type="button" onClick={onReset} className={buttonClass("secondary", "w-full")}>
-          Submit another payment
+          Pay for someone else
         </button>
       </Card>
     );
   }
 
+  const qr = state.status === "qr" && state.tranId !== closedTranId ? state : null;
   const errors = state.status === "error" ? (state.fields ?? {}) : {};
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!file) {
-      setFileError("Please upload the screenshot of your payment.");
-      return;
-    }
     const formData = new FormData(event.currentTarget);
-    startPreparing(async () => {
-      const slip = await shrinkImage(file);
-      formData.set("slip", slip, slip.name);
-      startPreparing(() => formAction(formData));
-    });
+    lastForm.current = formData;
+    startTransition(() => formAction(formData));
   }
 
-  function onPick(chosen: File | undefined) {
-    setFileError(null);
-    if (!chosen) return;
-    if (!["image/jpeg", "image/png", "image/webp"].includes(chosen.type)) {
-      setFileError("Only JPG, PNG or WEBP images are allowed.");
-      return;
-    }
-    if (chosen.size > MAX_SLIP_BYTES * 3) {
-      setFileError("The image is too large.");
-      return;
-    }
-    setFile(chosen);
+  /** Same details, fresh QR (after the old one expired). */
+  function newQr() {
+    if (lastForm.current) startTransition(() => formAction(lastForm.current!));
   }
 
   const noRooms = rooms.length === 0;
+  const noFee = monthlyFee === null;
   const roomResidents = residents.filter((r) => r.room === room);
   const typing = !room || roomResidents.length === 0 || pickedName === OTHER;
 
@@ -175,139 +98,226 @@ function Inner({ rooms, institutions, grades, residents, qrUrl, months, onReset 
   }
 
   return (
-    <form onSubmit={onSubmit} noValidate className="space-y-6">
-      {state.status === "error" && <Alert tone="error">{state.message}</Alert>}
+    <>
+      {qr && <PayStep key={qr.tranId} qr={qr} renewing={starting} onNewQr={newQr} onBack={() => setClosedTranId(qr.tranId)} onPaid={setPaid} />}
 
-      <Card className="space-y-4">
-        <StepTitle n={1}>Your details</StepTitle>
-        {noRooms && <Alert tone="warning">No rooms are set up yet. Please contact the dormitory office.</Alert>}
+      {/* Kept mounted (hidden) while the QR shows, so "Change details" brings the answers back. */}
+      <form onSubmit={onSubmit} noValidate className={cn("space-y-6", qr && "hidden")}>
+        {state.status === "error" && <Alert tone="error">{state.message}</Alert>}
 
-        <input type="hidden" name="month" value={month} />
-        {errors.month && <Alert tone="error">{errors.month} Please refresh the page.</Alert>}
-        <SelectField id="room" label="Room" options={rooms} placeholder="Choose your room" error={errors.room} value={room} onChange={onRoom} />
-        <div className="space-y-1.5">
-          <label htmlFor={roomResidents.length ? "student_pick" : "student_name"} className="block text-sm font-semibold text-slate-800">
-            Student name
-          </label>
-          {roomResidents.length > 0 && (
-            <select
-              id="student_pick"
-              name={pickedName === OTHER ? undefined : "student_name"}
-              required
-              value={pickedName}
-              onChange={(e) => onName(e.target.value)}
-              aria-invalid={Boolean(errors.student_name)}
-              className={inputClass(errors.student_name)}
-            >
-              <option value="" disabled>
-                Choose your name
-              </option>
-              {roomResidents.map((r) => (
-                <option key={r.name} value={r.name}>
-                  {r.name}
+        <Card className="space-y-4">
+          <StepTitle n={1}>Your details</StepTitle>
+          {noRooms && <Alert tone="warning">No rooms are set up yet. Please contact the dormitory office.</Alert>}
+
+          <input type="hidden" name="month" value={month} />
+          {errors.month && <Alert tone="error">{errors.month} Please refresh the page.</Alert>}
+          <SelectField id="room" label="Room" options={rooms} placeholder="Choose your room" error={errors.room} value={room} onChange={onRoom} />
+          <div className="space-y-1.5">
+            <label htmlFor={roomResidents.length ? "student_pick" : "student_name"} className="block text-sm font-semibold text-slate-800">
+              Student name
+            </label>
+            {roomResidents.length > 0 && (
+              <select
+                id="student_pick"
+                name={pickedName === OTHER ? undefined : "student_name"}
+                required
+                value={pickedName}
+                onChange={(e) => onName(e.target.value)}
+                aria-invalid={Boolean(errors.student_name)}
+                className={inputClass(errors.student_name)}
+              >
+                <option value="" disabled>
+                  Choose your name
                 </option>
-              ))}
-              <option value={OTHER}>My name is not in the list</option>
-            </select>
-          )}
-          {typing && (
-          <input
-            id="student_name"
-            name="student_name"
-            required
-            minLength={2}
-            maxLength={120}
-            autoComplete="name"
-            placeholder="e.g. Sok Dara"
-            aria-invalid={Boolean(errors.student_name)}
-            className={inputClass(errors.student_name)}
-          />
-          )}
-          {!room && residents.length > 0 && <p className="text-sm text-slate-500">Choose your room first to pick your name.</p>}
-          <FieldError id="student_name" error={errors.student_name} />
-        </div>
-        <SelectField id="grade" label="Grade" options={grades} placeholder="Choose your grade" error={errors.grade} value={grade} onChange={setGrade} />
-        <SelectField
-          id="institution"
-          label="Student at"
-          options={institutions}
-          placeholder="Choose your school"
-          error={errors.institution}
-          value={institution}
-          onChange={setInstitution}
-        />
-
-        {/* Honeypot for bots — hidden from people and screen readers. */}
-        <input type="text" name="website" tabIndex={-1} autoComplete="off" aria-hidden className="hidden" />
-      </Card>
-
-      <Card className="space-y-4">
-        <StepTitle n={2}>Scan to pay</StepTitle>
-        <p className="text-sm text-slate-600">Open ABA Mobile (or any KHQR banking app), scan this QR and pay your dormitory fee.</p>
-        <SaveQrButton qrUrl={qrUrl} />
-      </Card>
-
-      <Card className="space-y-4">
-        <StepTitle n={3}>Upload payment screenshot</StepTitle>
-        {preview ? (
-          <div className="relative">
-            {/* eslint-disable-next-line @next/next/no-img-element -- local blob preview */}
-            <img src={preview} alt="Your payment screenshot" className="mx-auto max-h-96 rounded-xl border border-slate-200" />
-            <button
-              type="button"
-              onClick={() => setFile(null)}
-              className="absolute right-2 top-2 rounded-full bg-white/90 p-1.5 text-slate-700 shadow hover:bg-white"
-              aria-label="Remove image"
-            >
-              <X className="size-5" aria-hidden />
-            </button>
-          </div>
-        ) : (
-          <label
-            htmlFor="slip"
-            className={cn(
-              "flex cursor-pointer flex-col items-center gap-2 rounded-xl border-2 border-dashed p-8 text-center transition hover:bg-slate-50",
-              fileError || errors.slip ? "border-red-300" : "border-slate-300",
+                {roomResidents.map((r) => (
+                  <option key={r.name} value={r.name}>
+                    {r.name}
+                  </option>
+                ))}
+                <option value={OTHER}>My name is not in the list</option>
+              </select>
             )}
-          >
-            <ImageUp className="size-10 text-brand-600" aria-hidden />
-            <span className="font-semibold text-slate-800">Tap to choose image</span>
-            <span className="text-sm text-slate-500">JPG, PNG or WEBP</span>
-          </label>
-        )}
-        <input
-          id="slip"
-          type="file"
-          accept="image/jpeg,image/png,image/webp"
-          className="sr-only"
-          onChange={(e) => {
-            onPick(e.target.files?.[0]);
-            e.target.value = "";
-          }}
-        />
-        <FieldError id="slip" error={fileError ?? errors.slip} />
-      </Card>
+            {typing && (
+              <input
+                id="student_name"
+                name="student_name"
+                required
+                minLength={2}
+                maxLength={120}
+                autoComplete="name"
+                placeholder="e.g. Sok Dara"
+                aria-invalid={Boolean(errors.student_name)}
+                className={inputClass(errors.student_name)}
+              />
+            )}
+            {!room && residents.length > 0 && <p className="text-sm text-slate-500">Choose your room first to pick your name.</p>}
+            <FieldError id="student_name" error={errors.student_name} />
+          </div>
+          <SelectField id="grade" label="Grade" options={grades} placeholder="Choose your grade" error={errors.grade} value={grade} onChange={setGrade} />
+          <SelectField
+            id="institution"
+            label="Student at"
+            options={institutions}
+            placeholder="Choose your school"
+            error={errors.institution}
+            value={institution}
+            onChange={setInstitution}
+          />
 
-      {!file && !noRooms && (
-        <p className="text-center text-sm text-slate-500">Upload your payment screenshot to submit.</p>
-      )}
-      <button type="submit" disabled={pending || noRooms || !file} className={buttonClass("primary", "w-full")}>
-        {pending ? (
-          <>
-            <Spinner label="Submitting" /> Submitting…
-          </>
-        ) : (
-          <>
-            <Send className="size-5" aria-hidden /> Submit payment
-          </>
-        )}
-      </button>
-    </form>
+          {/* Honeypot for bots — hidden from people and screen readers. */}
+          <input type="text" name="website" tabIndex={-1} autoComplete="off" aria-hidden className="hidden" />
+        </Card>
+
+        <Card className="space-y-4">
+          <StepTitle n={2}>Pay with KHQR</StepTitle>
+          {noFee ? (
+            <Alert tone="warning">The dormitory fee is not set yet. Please contact the dormitory office.</Alert>
+          ) : (
+            <div className="flex items-baseline justify-between rounded-xl bg-slate-50 px-4 py-3">
+              <span className="text-sm text-slate-600">Dormitory fee · {months[0]?.label}</span>
+              <span className="text-2xl font-bold text-slate-900">{usd(monthlyFee)}</span>
+            </div>
+          )}
+          <p className="text-sm text-slate-600">You will get a QR for this exact amount. Pay it with ABA Mobile or any KHQR banking app — your payment is confirmed automatically.</p>
+          <button type="submit" disabled={starting || noRooms || noFee} className={buttonClass("primary", "w-full")}>
+            {starting ? (
+              <>
+                <Spinner label="Creating QR" /> Creating QR…
+              </>
+            ) : (
+              <>
+                <QrCode className="size-5" aria-hidden /> Get payment QR
+              </>
+            )}
+          </button>
+        </Card>
+      </form>
+    </>
   );
 }
 
-/** Same-origin URL that serves the QR as a file download (see app/qr/download/route.ts). */
-const QR_DOWNLOAD_URL = "/qr/download";
+/** Seconds left until `iso`, updated every second. */
+function useSecondsLeft(iso: string) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return Math.max(0, Math.floor((Date.parse(iso) - now) / 1000));
+}
+
+type Watch = { state: "pending" } | { state: "expired" } | { state: "failed"; message: string };
+
+/**
+ * The one-time QR for this payment. The page asks the server every few seconds
+ * (and as soon as the student comes back from the banking app) whether PayWay
+ * has the payment; once it does, the receipt shows.
+ */
+function PayStep({ qr, renewing, onNewQr, onBack, onPaid }: { qr: QrState; renewing: boolean; onNewQr: () => void; onBack: () => void; onPaid: (paid: PaidResult) => void }) {
+  const [watch, setWatch] = useState<Watch>({ state: "pending" });
+  const secondsLeft = useSecondsLeft(qr.expiresAt);
+  const onPaidRef = useRef(onPaid);
+  useEffect(() => {
+    onPaidRef.current = onPaid;
+  });
+
+  const done = watch.state !== "pending";
+
+  useEffect(() => {
+    if (done) return;
+    let stopped = false;
+    let busy = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    async function poll() {
+      if (stopped || busy) return;
+      busy = true;
+      clearTimeout(timer);
+      try {
+        const res = await checkPayment(qr.tranId);
+        if (stopped) return;
+        if (res.state === "paid") {
+          stopped = true;
+          const { state: _state, ...paid } = res; // eslint-disable-line @typescript-eslint/no-unused-vars
+          onPaidRef.current(paid);
+          return;
+        }
+        if (res.state === "expired" || res.state === "failed") {
+          stopped = true;
+          setWatch(res);
+          return;
+        }
+      } catch {
+        // offline for a moment: try again on the next tick
+      } finally {
+        busy = false;
+      }
+      if (!stopped) timer = setTimeout(poll, POLL_MS);
+    }
+
+    const onVisible = () => document.visibilityState === "visible" && void poll();
+    document.addEventListener("visibilitychange", onVisible);
+    timer = setTimeout(poll, POLL_MS);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [qr.tranId, done]);
+
+  const mm = Math.floor(secondsLeft / 60);
+  const ss = String(secondsLeft % 60).padStart(2, "0");
+
+  return (
+    <Card className="space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <StepTitle n={2}>Scan to pay</StepTitle>
+        <button type="button" onClick={onBack} className="rounded-full p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-800" aria-label="Change details">
+          <X className="size-5" aria-hidden />
+        </button>
+      </div>
+
+      <div className="flex items-baseline justify-between rounded-xl bg-slate-50 px-4 py-3">
+        <span className="min-w-0 truncate text-sm text-slate-600">
+          {qr.studentName} · {qr.monthLabel}
+        </span>
+        <span className="text-2xl font-bold text-slate-900">{usd(qr.amount)}</span>
+      </div>
+
+      {watch.state === "pending" ? (
+        <>
+          <SaveQr url={qr.qrImageUrl} />
+          {qr.deeplink && (
+            <a href={qr.deeplink} className={buttonClass("primary", "w-full")}>
+              <Smartphone className="size-5" aria-hidden /> Pay in ABA Mobile
+            </a>
+          )}
+          <p className="flex items-center justify-center gap-2 text-sm font-medium text-slate-600" role="status" aria-live="polite">
+            <Spinner label="Waiting for payment" className="size-4" /> Waiting for your payment…
+            <span className="inline-flex items-center gap-1 font-mono text-slate-500">
+              <Clock className="size-4" aria-hidden /> {mm}:{ss}
+            </span>
+          </p>
+          <p className="text-center text-xs text-slate-500">Keep this page open. It updates by itself as soon as the payment goes through.</p>
+        </>
+      ) : (
+        <div className="space-y-3">
+          <Alert tone={watch.state === "expired" ? "warning" : "error"} title={watch.state === "expired" ? "This QR has expired" : "Payment not completed"}>
+            {watch.state === "expired" ? "Nothing was charged. Create a new QR to pay." : watch.message}
+          </Alert>
+          <button type="button" onClick={onNewQr} disabled={renewing} className={buttonClass("primary", "w-full")}>
+            {renewing ? <Spinner label="Creating QR" /> : <RotateCcw className="size-5" aria-hidden />} Create a new QR
+          </button>
+        </div>
+      )}
+
+      <button type="button" onClick={onBack} className={buttonClass("secondary", "w-full")}>
+        Change details
+      </button>
+    </Card>
+  );
+}
+
 
 /** iPhone / iPad. Every iOS browser (Safari, Chrome, Firefox, Edge, in-app) is WebKit. */
 function isIOS() {
@@ -481,43 +491,22 @@ function DownloadToast({ status, what }: { status: SaveStatus; what: string }) {
 }
 
 /**
- * QR image plus a "Save QR image" button (see useDownload: Photos on iPhone,
- * Download / Gallery on Android). A copy of the QR is kept silently in the
- * browser as soon as the page opens. Every tap saves it; once saved, the
- * button turns green so the student can see it.
+ * This payment's QR plus a "Save QR image" button (see useDownload: Photos on
+ * iPhone, Download / Gallery on Android), for paying from a banking app on the
+ * same phone by choosing the image from the gallery.
  */
-function SaveQrButton({ qrUrl }: { qrUrl: string }) {
-  const { status, start, warm } = useDownload(QR_DOWNLOAD_URL, "dormpay-qr", { prefetch: true });
+function SaveQr({ url }: { url: string }) {
+  const { status, start, warm } = useDownload(url, "dormpay-qr", { prefetch: true });
   const label = useIosLabel("Save QR to Photos", "Save QR image");
-  const alreadySaved = useQrAlreadySaved(qrUrl);
-  const storedCopy = useStoredQrImage(qrUrl);
-  const [broken, setBroken] = useState(false);
-
-  useEffect(() => {
-    void storeQrImage(qrUrl, QR_DOWNLOAD_URL);
-  }, [qrUrl]);
-
-  function save() {
-    start();
-    markQrSaved(qrUrl);
-  }
-
   return (
     <>
-      {/* eslint-disable-next-line @next/next/no-img-element -- admin-managed image from Supabase Storage */}
+      {/* eslint-disable-next-line @next/next/no-img-element -- one-time KHQR generated by ABA PayWay */}
       <img
-        src={broken && storedCopy ? storedCopy : qrUrl}
-        onError={() => setBroken(true)}
-        alt="Dormitory ABA KHQR code"
+        src={url}
+        alt="ABA KHQR code for this payment"
         className={cn("mx-auto w-full max-w-xs rounded-xl border border-slate-200 transition-shadow [-webkit-touch-callout:default]", highlightClass(status))}
       />
-      {alreadySaved && status === "idle" ? (
-        <button type="button" onClick={save} onTouchStart={warm} className={buttonClass("secondary", "w-full border-emerald-300 text-emerald-700")}>
-          <CheckCircle2 className="size-5" aria-hidden /> QR saved · Tap to save again
-        </button>
-      ) : (
-        <DownloadButton status={status} onClick={save} onTouchStart={warm} label={label} />
-      )}
+      <DownloadButton status={status} onClick={() => start()} onTouchStart={warm} label={label} />
       <DownloadToast status={status} what="QR" />
     </>
   );

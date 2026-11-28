@@ -36,7 +36,7 @@ function formatTime(iso: string) {
 
 /**
  * The payment receipt as a PNG file download (Content-Disposition: attachment),
- * so phones save it instead of opening it — same approach as /qr/download.
+ * so phones save it instead of opening it — same approach as /qr/[tranId].
  */
 export async function GET(request: Request, { params }: { params: Promise<{ reference: string }> }) {
   const { reference } = await params;
@@ -46,7 +46,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ refe
 
   const { data, error } = await db()
     .from("payment_submissions")
-    .select("reference, room, student_name, grade, institution, for_month, created_at")
+    .select("reference, room, student_name, grade, institution, for_month, created_at, status, amount, currency, paid_at")
     .eq("reference", reference)
     .maybeSingle();
   if (error) {
@@ -61,8 +61,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ refe
     ["Grade", data.grade as string],
     ["Student at", data.institution as string],
     ["Month paid", formatMonth(String(data.for_month))],
-    ["Submitted", formatTime(data.created_at as string)],
+    ...(data.amount != null ? ([["Amount", `${Number(data.amount).toFixed(2)} ${data.currency ?? "USD"}`]] as [string, string][]) : []),
+    [data.paid_at ? "Paid" : "Submitted", formatTime((data.paid_at ?? data.created_at) as string)],
   ];
+  // PayWay payments are confirmed on the spot; older screenshot payments wait for the office.
+  const confirmed = data.status === "approved";
 
   const fonts = await loadKhmerFonts();
   return new ImageResponse(
@@ -76,7 +79,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ refe
               </svg>
             </div>
             <div style={{ display: "flex", flexDirection: "column" }}>
-              <div style={{ fontSize: 44, fontWeight: 700, color: "#0f172a" }}>Payment submitted</div>
+              <div style={{ fontSize: 44, fontWeight: 700, color: "#0f172a" }}>{confirmed ? "Payment received" : "Payment submitted"}</div>
               <div style={{ fontSize: 26, color: "#64748b" }}>DormPay · Dormitory fee receipt</div>
             </div>
           </div>
@@ -96,7 +99,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ refe
           </div>
 
           <div style={{ marginTop: "auto", fontSize: 22, color: "#94a3b8", textAlign: "center", display: "flex", justifyContent: "center" }}>
-            Waiting for the dormitory office to check your payment screenshot.
+            {data.paid_at ? "Paid with ABA KHQR · confirmed by ABA PayWay." : confirmed ? "Approved by the dormitory office." : "Waiting for the dormitory office to check your payment."}
           </div>
         </div>
       </div>

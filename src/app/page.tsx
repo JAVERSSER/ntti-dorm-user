@@ -4,7 +4,7 @@ import { getFormOptions, type FormOptions } from "@/lib/form-data";
 import { PaymentForm } from "./payment-form";
 
 export default async function HomePage() {
-  await connection(); // always read the latest rooms / schools / QR
+  await connection(); // always read the latest rooms / schools / fee
 
   let options: FormOptions;
   try {
@@ -22,7 +22,7 @@ export default async function HomePage() {
     <div className="space-y-6">
       <header>
         <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Pay dormitory fee</h1>
-        <p className="mt-1.5 text-slate-600">Fill in your details, scan the QR to pay, then upload your payment screenshot.</p>
+        <p className="mt-1.5 text-slate-600">Fill in your details, then scan your QR to pay. Your payment is confirmed automatically.</p>
       </header>
       <PaymentForm {...options} />
     </div>

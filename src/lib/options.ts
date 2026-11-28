@@ -1,9 +1,6 @@
 /** Fallback grades, used only if the admin-managed "grades" table cannot be read. */
 export const GRADES = ["Year 1", "Year 2", "Year 3", "Year 4", "Year 5", "C1", "C2", "C3"] as const;
 
-/** Largest screenshot accepted (bytes). Must stay under next.config bodySizeLimit. */
-export const MAX_SLIP_BYTES = 5 * 1024 * 1024;
-
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",

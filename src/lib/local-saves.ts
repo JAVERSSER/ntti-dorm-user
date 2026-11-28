@@ -4,12 +4,10 @@ import { useSyncExternalStore } from "react";
 
 /**
  * Things kept silently in this browser's localStorage (no download, no
- * question): the payment QR image and the student's past receipts.
+ * question): the student's past receipts and download counters.
  * Every access is wrapped: private mode or a full storage just skips saving.
  */
 
-const QR_IMAGE_KEY = "dormpay:qr-image";
-const QR_SAVED_KEY = "dormpay:qr-saved";
 const RECEIPTS_KEY = "dormpay:receipts";
 /** Keep the latest receipts only; localStorage is small (about 5 MB). */
 const MAX_RECEIPTS = 24;
@@ -59,48 +57,6 @@ function useStored(key: string): string | null {
     () => read(key),
     () => null,
   );
-}
-
-// ---- QR ----------------------------------------------------------------
-
-/** Keep a copy of the current QR image in the browser (skipped if already stored). */
-export async function storeQrImage(qrUrl: string, downloadUrl: string) {
-  try {
-    const stored = JSON.parse(read(QR_IMAGE_KEY) ?? "null") as { src: string } | null;
-    if (stored?.src === qrUrl) return;
-    const res = await fetch(downloadUrl);
-    if (!res.ok) return;
-    const blob = await res.blob();
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-      const r = new FileReader();
-      r.onload = () => resolve(r.result as string);
-      r.onerror = () => reject(r.error);
-      r.readAsDataURL(blob);
-    });
-    write(QR_IMAGE_KEY, JSON.stringify({ src: qrUrl, dataUrl, savedAt: new Date().toISOString() }));
-  } catch {
-    // best effort
-  }
-}
-
-/** The stored copy of this QR as a data: URL, if any (used when the image cannot load). */
-export function useStoredQrImage(qrUrl: string): string | null {
-  const raw = useStored(QR_IMAGE_KEY);
-  try {
-    const stored = JSON.parse(raw ?? "null") as { src: string; dataUrl: string } | null;
-    return stored?.src === qrUrl ? stored.dataUrl : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Whether this exact QR was already saved to the phone from this browser. */
-export function useQrAlreadySaved(qrUrl: string): boolean {
-  return useStored(QR_SAVED_KEY) === qrUrl;
-}
-
-export function markQrSaved(qrUrl: string) {
-  write(QR_SAVED_KEY, qrUrl);
 }
 
 // ---- Download file names ------------------------------------------------

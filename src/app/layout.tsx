@@ -8,7 +8,7 @@ const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"]
 
 export const metadata: Metadata = {
   title: { default: "Dormitory Fee Payment", template: "%s · Dormitory" },
-  description: "Pay your dormitory fee with ABA QR and upload your payment screenshot.",
+  description: "Pay your dormitory fee with ABA KHQR.",
   robots: { index: false, follow: false },
   icons: { icon: "/logo.png" },
 };
